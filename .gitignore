@@ -1,0 +1,47 @@
+# Models (large binary files, download separately)
+models/
+
+# Runtime data
+data/
+
+# Frontend build output
+frontend/dist/
+frontend/node_modules/
+
+# Docker volumes
+volumes/
+
+# Secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

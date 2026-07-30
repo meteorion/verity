@@ -1,0 +1,45 @@
+model_list:
+  - model_name: chat
+    litellm_params:
+      model: claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+      timeout: 60
+      stream_timeout: 120
+
+  - model_name: chat
+    litellm_params:
+      model: gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      timeout: 60
+      stream_timeout: 120
+
+  # Private deployment fallback (uncomment when available)
+  # - model_name: chat
+  #   litellm_params:
+  #     model: openai/qwen2.5-72b-instruct
+  #     api_base: http://qwen-vllm:8000/v1
+  #     api_key: EMPTY
+
+  - model_name: judge
+    litellm_params:
+      model: gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+router_settings:
+  routing_strategy: least-busy
+  allowed_fails: 2
+  num_retries: 2
+  retry_after: 5
+  fallbacks:
+    - chat:
+        - gpt-4o
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/PGVECTOR_DSN
