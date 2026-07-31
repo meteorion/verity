@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档名称 | 执行方案规划 |
-| 版本 | V1.0 |
+| 版本 | V1.2（V1.1 随 arch.md V1.2 同步修正 FAQ 索引存储、Rerank/NLI 开关控制；V1.2 重新起算时间线并清空 P0 占位勾选，见 §1/§4） |
 | 关联文档 | design.md V1.1 |
 | 总周期 | 12 周（P0–P2）+ 持续运营（P3）；全渠道扩展（原 P3）列为后续版本规划 |
 | 读者对象 | 项目经理、技术负责人、业务负责人 |
@@ -12,14 +12,15 @@
 
 ## 1. 总体时间线
 
+> 本节以 **2026-07-31** 为第 1 周第 1 天重新起算（此前 P0/基础设施准备均未实际开始，见 §4/§5 任务清单的勾选状态）。
+
 ```
-第 -2 ~ 0 周   基础设施准备（与 P0 并行）
-第  1 ~  2 周   P0  现状调研
+第  1 ~  2 周   基础设施准备（与 P0 并行）+ P0 现状调研
 第  3 ~  6 周   P1  MVP
 第  7 ~ 12 周   P2  能力完善
 第 13 周起      P3  精细运营（持续）
 ────────────────────────────────────────
-后续版本        P4  全渠道扩展（微信 / App / 语音，待排期）
+后续版本        P4  全渠道扩展（微信 / App / 语音，待排期，见第 7 节，不给具体日期）
 ```
 
 ```mermaid
@@ -27,21 +28,22 @@ gantt
     dateFormat  YYYY-MM-DD
     axisFormat  W%W
     section 准备
-    基础设施准备        :infra,  2026-07-16, 14d
+    基础设施准备        :infra,  2026-07-31, 14d
     section P0
-    现状调研            :p0,     2026-07-30, 14d
+    现状调研            :p0,     2026-07-31, 14d
     section P1
-    知识管道 & 向量库   :p1a,    2026-08-13, 14d
+    知识管道 & 向量库   :p1a,    after p0,   14d
     RAG 核心 & Web UI   :p1b,    after p1a,  14d
     section P2
-    混合检索 & Rerank   :p2a,    2026-09-10, 14d
+    混合检索 & Rerank   :p2a,    after p1b,  14d
     多轮 & 工具调用     :p2b,    after p2a,  14d
     幻觉抑制 & 安全     :p2c,    after p2b,  14d
     section P3
-    精细运营（持续）    :p3,     2026-09-10, 60d
-    section 后续版本
-    全渠道扩展（待排期）:done,   p4,  2026-12-03, 14d
+    精细运营（持续）    :p3,     after p2c,  60d
 ```
+
+> 全渠道扩展（后续版本 P4）不列入本图：其排期取决于 P3 阶段的系统稳定性、知识库覆盖率评估结果（见第 7 节），
+> 在评估完成前标注任何具体日期都是虚假的确定性，故只在文字时间线里保留"待排期"。
 
 ---
 
@@ -85,34 +87,38 @@ gantt
 
 ### 3.2 Embedding 模型
 
+> **状态：待选型**。项目暂不使用 BGE-M3，以下候选均为待评估方案，最终选型以 P0 benchmark 结果为准，不预设推荐项。
+
 | 候选 | 维度 | 特点 | 适用场景 |
 | --- | --- | --- | --- |
-| **BGE-M3**（推荐） | 1024 | 同时输出密集向量 + 稀疏向量，可直接替代 BM25，多语言 | P1 起步首选 |
+| BGE-M3 | 1024 | 同时输出密集向量 + 稀疏向量，可直接替代 BM25，多语言 | 暂不采用 |
 | BCE-Embedding-Base-V1 | 768 | 中文优化，FlagEmbedding 系列 | 纯中文场景备选 |
 | text-embedding-3-large | 3072（可降维至 256） | OpenAI API，无需 GPU，云端调用 | 无 GPU 资源时的快速验证 |
 | Jina-embeddings-v3 | 1024 | 支持 task-specific 微调，多语言 | 混合语言知识库 |
 
-**推荐**：BGE-M3，理由：一个模型同时提供密集向量和稀疏向量，无需额外部署 BM25 引擎；GPU 单卡 T4 可支撑离线批量向量化，在线 Embedding 服务 2 卡可满足峰值 QPS。
-
 **关键约束**：
 - Embedding 模型版本与向量库索引强绑定，换模型必须全量重建索引（蓝绿策略）
 - P0 技术选型阶段须在金标数据集上 benchmark ≥ 3 个候选模型，选 Recall@5 最高者
+- 若最终选型不产出稀疏向量（如 text-embedding-3-large），§3.5 BM25 方案需相应改用 Elasticsearch/Tantivy 独立路线，不能依赖"稀疏向量零额外部署"的前提
 
 ---
 
 ### 3.3 Rerank 模型
 
+> **状态：P1 暂不引入**。第一阶段走最小成本路线，不自建 GPU 服务，也不接第三方付费 Rerank API；P1 检索直接用向量相似度排序 Top-K 进生成，暂不加 Cross-Encoder 精排。候选表保留供 P2 需要时评估。
+>
+> 代码层面用 `ENABLE_RERANK` 开关控制（默认 `false`）：关闭时 `inference/rerank.py` 不导入
+> FlagEmbedding、不要求装依赖或下载模型；P2 评估通过后把开关打开即可，调用点无需改动。
+
 | 候选 | 特点 | 适用场景 |
 | --- | --- | --- |
-| **BGE-Reranker-v2-m3**（推荐） | BAAI 出品，多语言，单卡 L4 支撑数百 QPS，sigmoid 输出 | 私有化首选 |
+| BGE-Reranker-v2-m3 | BAAI 出品，多语言，单卡 L4 支撑数百 QPS，sigmoid 输出 | 需要 GPU，P2 视召回效果决定是否引入 |
 | BCE-Reranker-Base-V1 | 中文优化，轻量 | 纯中文 + 资源受限 |
 | Jina-Reranker-v2-base-multilingual | 多语言，Apache 2.0 | 多语言备选 |
-| Cohere Rerank API | 商用，无需 GPU | GPU 资源不足时过渡方案 |
+| Cohere Rerank API | 商用，无需 GPU | 付费 API，P1 不采用 |
 
-**推荐**：BGE-Reranker-v2-m3 私有化部署（L4 GPU × 2）。
-
-**关键约束**：
-- 相关性阈值（design.md 附录 B 的 0.35）为 sigmoid 输出型模型参考值，**必须在 P0 阶段对选定模型实测标定**，不可直接沿用
+**关键约束**（P2 引入时生效）：
+- 相关性阈值（design.md 附录 B 的 0.35）为 sigmoid 输出型模型参考值，**必须实测标定**，不可直接沿用
 - 标定方法：取金标数据集，对负样本（非相关 chunk）打分，取 FPR < 5% 时的分数作为阈值下限
 
 ---
@@ -142,14 +148,16 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 ### 3.5 BM25 / 稀疏检索
 
+> Embedding 选型待定（暂不使用 BGE-M3），"稀疏向量随 Embedding 模型零额外部署"这条路线暂不成立，先按独立 BM25 服务规划。
+
 | 方案 | 特点 | 推荐场景 |
 | --- | --- | --- |
-| **BGE-M3 稀疏向量**（推荐） | 已选 BGE-M3 则零额外部署，Qdrant 原生存储 | 与 Qdrant 配合，一库双路 |
-| Elasticsearch BM25 | 标准中文分词（IK Analyzer），成熟稳定 | 已有 ES 集群 / 大规模 |
+| Embedding 模型自带稀疏向量 | 若最终选型支持（如 BGE-M3），零额外部署，Qdrant 原生存储 | 待 Embedding 选型确定后重新评估 |
+| **Elasticsearch BM25**（当前推荐） | 标准中文分词（IK Analyzer），成熟稳定 | 已有 ES 集群 / 大规模 |
 | Tantivy（tantivy-py） | Rust 实现，轻量，无需独立服务 | 无 ES、规模小 |
 | Jieba + rank_bm25 | 纯 Python，适合原型验证 | P1 快速验证，不上生产 |
 
-**推荐**：选 BGE-M3 + Qdrant 时，直接使用 BGE-M3 的稀疏输出，无需额外维护 BM25 服务；选 PGVector 时，用独立 Elasticsearch 做 BM25（或 Tantivy 轻量替代）。
+**推荐**：在 Embedding 选型明确前，先用独立 Elasticsearch（或 Tantivy 轻量替代）做 BM25，避免绑定到某个 Embedding 模型的稀疏输出能力。
 
 ---
 
@@ -205,6 +213,9 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 **用法**：以 `(premise=chunk内容, hypothesis=答案中的论断)` 输入，取 `entailment` 概率；低于 0.6 时标记为"待复核"，触发人工复核工单，**不阻断已输出的流式答案**。
 
+代码层面用 `ENABLE_NLI` 开关控制（默认 `false`）：关闭时 `inference/nli.py` 不导入 transformers、
+不要求装依赖或下载模型，`generate_node` 也不会触发 NLI 检查；P2 落地时把开关打开即可。
+
 ---
 
 ### 3.9 意图分类 & 内容安全
@@ -221,13 +232,15 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 #### 内容安全审核
 
+> **P1 暂不接商用付费 API**。先用本地词典单层防护把安全过滤跑起来，验证有效后再评估是否叠加商用 API 做双层防护。
+
 | 候选 | 特点 |
 | --- | --- |
-| **阿里云内容安全 API**（推荐） | 开箱即用，支持自定义词库，按调用量计费 |
+| 阿里云内容安全 API | 开箱即用，支持自定义词库，按调用量计费；P2+ 视预算决定是否引入 |
 | 腾讯天御 | 同类商用方案，可备用 |
-| 本地敏感词词典 + AC 自动机 | 完全私有化，需自维护词典，延迟 < 1ms |
+| **本地敏感词词典 + AC 自动机**（P1 推荐） | 完全私有化，零调用成本，需自维护词典，延迟 < 1ms |
 
-**推荐**：商用 API（输入审核）+ 本地词典（输出审核兜底），双层防护。高敏感行业可全量走本地词典。
+**推荐**：P1 先用本地词典（输入 + 输出审核），零成本跑通安全过滤；P2 视红队测试结果决定是否叠加商用 API 做双层防护。
 
 ---
 
@@ -245,36 +258,44 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 ### 3.11 LLM 网关
 
+> **状态：待确认**。项目暂不确定使用 LiteLLM，`docker-compose.yml` 里的 litellm 服务定义先保留（标注待启用），应用侧也尚未真正接入网关调用（`generate_node` 仍是 TODO 占位）。
+
 | 候选 | 特点 |
 | --- | --- |
-| **LiteLLM**（推荐） | 开源，统一 API 兼容 100+ 模型，支持限流、成本统计、fallback 路由 |
+| LiteLLM | 开源，统一 API 兼容 100+ 模型，支持限流、成本统计、fallback 路由 |
 | One API | 国内开源，支持更多国内商用模型（文心、通义等），适合国内私有化环境 |
 | PortKey | 商用 SaaS，功能完善，无需自运维 |
+| 直连各家 SDK | 不经统一网关，应用直接调用 Anthropic/OpenAI/DashScope SDK，架构更简单，但限流/故障切换/成本统计需自行实现 |
 
-**推荐**：LiteLLM 自部署（容器化，单副本即可），配置主备模型 fallback：`Claude Sonnet → GPT-4o → 私有化 Qwen`；同时接入 One API 兼容国内模型接口。
+**待定**：是否引入统一网关（LiteLLM 等）或应用直连各家 SDK，需在正式接入 LLM 调用前确认；主备模型 fallback 顺序按设想仍是 `Claude Sonnet → GPT-4o → 私有化 Qwen`，与网关方案无关。
 
 ---
 
 ### 3.12 可观测平台
 
-| 组件 | 用途 | 推荐方案 |
-| --- | --- | --- |
-| LLM Trace | query→检索→prompt→输出全链路追踪 | **Langfuse**（开源自部署，支持 Prompt 版本管理、评分、数据集） |
-| 基础指标 & 告警 | 延迟、错误率、QPS、GPU 利用率 | OpenTelemetry + Prometheus + Grafana |
-| 日志 | 结构化日志、PII 掩码 | Loki（轻量）或 ELK |
-| 成本追踪 | Token 用量、每会话成本 | LiteLLM 内置 + Langfuse |
+> **P1 暂不部署独立可观测平台**。Langfuse / OpenTelemetry / Prometheus / Grafana 这套栈延后到 P2+ 流量规模真正需要时再上；P1 先用结构化日志把关键字段落盘，保证问题可排查，不额外起服务、不占运维精力。
 
-**关键 Trace 字段**：每条 trace 须记录 `session_id`、`query_raw`、`query_rewritten`、`chunks[{chunk_id, score}]`、`prompt_version`、`model_id`、`output_tokens`、`first_token_latency_ms`。
+| 组件 | 用途 | P1 方案 | P2+ 演进 |
+| --- | --- | --- | --- |
+| LLM Trace | query→检索→prompt→输出全链路追踪 | 应用内结构化日志（一行一条 trace） | Langfuse（开源自部署，支持 Prompt 版本管理、评分、数据集） |
+| 基础指标 & 告警 | 延迟、错误率、QPS | 日志 + 简单阈值巡检 | OpenTelemetry + Prometheus + Grafana |
+| 日志 | 结构化日志、PII 掩码 | 本地文件 / stdout | Loki（轻量）或 ELK |
+| 成本追踪 | Token 用量、每会话成本 | 日志里记录 token 数，手动/脚本汇总 | Langfuse（若引入网关可叠加其内置成本统计） |
+
+**关键字段**（P1 结构化日志即需落盘，字段与 P2 Trace 保持一致，便于后续平滑迁移）：`session_id`、`query_raw`、`query_rewritten`、`chunks[{chunk_id, score}]`、`prompt_version`、`model_id`、`output_tokens`、`first_token_latency_ms`。
 
 ---
 
 ### 3.13 会话存储 & 消息队列
 
-| 用途 | 推荐方案 | 说明 |
-| --- | --- | --- |
-| 会话状态（活跃中） | **Redis**（Hash/Stream） | TTL 24h，LangGraph 状态持久化 |
-| 历史会话（审计） | **PostgreSQL** | 完整保存，满足合规审计要求 |
-| 微信 / 语音异步回调（后续版本） | **Redis Stream** | 利用已有 Redis，无需引入独立 MQ；超 1000 QPS 时评估 RocketMQ |
+> **P1 单实例暂不引入 Redis**。会话状态先用应用内存（进程内 dict/LangGraph 内存 Checkpointer）承载，减少一个容器；引入多实例/HPA 扩容时（P2+）再切 Redis，避免单实例重启丢多轮上下文的问题也留到那时一并解决。
+
+| 用途 | P1 方案 | P2+ 演进 | 说明 |
+| --- | --- | --- | --- |
+| 会话状态（活跃中） | 应用内存（单实例，进程重启会丢） | Redis（Hash/Stream），TTL 24h | 多实例/HPA 扩容前必须切 Redis，否则会话状态不共享 |
+| FAQ 精准匹配索引 | 进程内 dict（启动时读本地 JSON，见 `FAQ_INDEX_PATH`） | Redis Hash（`faq:{id}`，见 design.md/arch.md §6.2） | P1 单实例零依赖；多实例化时换成 Redis，`faq_node` 接口不变 |
+| 历史会话（审计） | **PostgreSQL** | 同左 | 完整保存，满足合规审计要求，P1 即上 |
+| 微信 / 语音异步回调（后续版本） | 不涉及 | **Redis Stream** | 利用届时已引入的 Redis，无需独立 MQ；超 1000 QPS 时评估 RocketMQ |
 
 ---
 
@@ -291,48 +312,51 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 ### 3.15 技术栈总览
 
-| 层次 | P1 选型（起步） | P2 演进 / 后续版本 |
+> **P1 原则**：不自建 GPU 服务、不接商用付费 API（LLM 本身除外）、能延后的运维/观测组件延后、能少一个容器就少一个。下表"P1 选型"即按此原则给出最小可用集合。
+
+| 层次 | P1 选型（最小成本起步） | P2 演进 / 后续版本 |
 | --- | --- | --- |
-| 大模型 | Claude Sonnet API + LiteLLM 网关 | 视合规需求切换 Qwen2.5-72B 私有化 |
-| Embedding | BGE-M3（本地 GPU T4 × 2） | 版本升级时蓝绿重建 |
-| Rerank | BGE-Reranker-v2-m3（本地 GPU L4 × 2） | 同上 |
+| 大模型 | Claude Sonnet API（网关方案待确认，见 §3.11） | 视合规需求切换 Qwen2.5-72B 私有化 |
+| Embedding | 待选型（暂不使用 BGE-M3，见 §3.2；P1 候选优先 CPU 可跑/免付费） | 视规模换更强模型，蓝绿重建索引 |
+| Rerank | 暂不引入（向量相似度排序直出 Top-K，见 §3.3） | 召回效果不足再评估 BGE-Reranker-v2-m3（需 GPU） |
 | 向量库 | PGVector | 超 50 万 chunk 后迁移 Qdrant |
-| 稀疏检索 | BGE-M3 稀疏向量（Qdrant 存储）/ Tantivy | 随向量库迁移统一到 Qdrant |
+| 稀疏检索 | 暂不引入（单路向量检索） | 混合检索（BM25/稀疏向量，见 §3.5）+ RRF 融合 |
 | 编排框架 | LangGraph + LlamaIndex（知识管道） | — |
 | 文档解析 | Marker（PDF）+ python-docx + PaddleOCR | — |
-| NLI 校验 | chinese-roberta-wwm-ext-nli（CPU 异步） | — |
+| NLI 校验 | 暂不引入（P2 幻觉抑制专项，见 §3.8） | chinese-roberta-wwm-ext-nli（CPU 异步） |
 | 意图分类 | FastText fine-tune（CPU） | — |
-| 内容安全 | 阿里云内容安全 API + 本地词典 | — |
-| 语义缓存 | Redis Stack | — |
-| 可观测 | Langfuse + OpenTelemetry + Grafana | — |
-| 会话存储 | Redis（活跃）+ PostgreSQL（审计） | — |
-| 消息队列（后续版本） | Redis Stream | 超高并发时评估 RocketMQ |
-| ASR/TTS（后续版本） | 阿里云 ASR/TTS API | — |
+| 内容安全 | 本地敏感词词典 + AC 自动机（见 §3.9） | 视红队结果叠加阿里云内容安全 API |
+| 语义缓存 | 暂不引入 | Redis Stack，见 §3.10 |
+| 可观测 | 结构化日志（见 §3.12） | Langfuse + OpenTelemetry + Grafana |
+| 会话存储 | 应用内存（活跃，单实例）+ PostgreSQL（审计） | Redis（活跃，多实例/HPA 前必须切） |
+| 消息队列（后续版本） | 不涉及 | Redis Stream，超高并发时评估 RocketMQ |
+| ASR/TTS（后续版本） | 不涉及 | 阿里云 ASR/TTS API |
 
 ---
 
 ## 4. 基础设施准备（第 -2 ~ 0 周，与 P0 并行）
 
-本阶段目标：P1 开始时工程团队可直接在具备 GPU、可观测、CI/CD 的环境上开发，不被基础设施卡住。
+本阶段目标：P1 开始时工程团队可直接在具备存储、CI/CD 的环境上开发，不被基础设施卡住。**按最小成本原则，本阶段不申请 GPU、不部署独立可观测平台**，这些留到 P2 视实际需要再引入。
 
 ### 3.1 计算与存储
 
 | 任务 | Owner | 完成标准 |
 | --- | --- | --- |
-| 申请 K8s 集群，划分 GPU 节点池（Embedding × 2、Rerank × 2） | DevOps | 节点 Ready，GPU 驱动版本确认 |
 | 规划本地文件存储目录结构（原始文档目录、父级 chunk 目录、解析缓存目录），配置读写权限 | DevOps | 目录创建，读写权限测试通过；预留后续迁移对象存储的路径抽象层 |
 | 选型并部署向量库（推荐 PGVector 起步，后续可迁移 Qdrant） | DevOps + 算法 | 写入 10 万 dummy 向量，ANN 查询延迟 < 50ms |
-| 申请或部署 LLM（商用 API key / 私有化模型实例） | 算法 + PM | 接口联通，流式输出验证 |
-| 配置 LLM 网关（限流、成本计量、故障切换） | 后端 | 双模型 fallback 测试通过 |
+| 申请 LLM 商用 API key（Claude / 通义等） | 算法 + PM | 接口联通，流式输出验证 |
+
+> GPU 节点池（Embedding × 2、Rerank × 2）暂不申请：P1 Embedding 待选型优先 CPU 可跑方案，Rerank 暂不引入（见 §3.2/§3.3）。P2 若需要自建 GPU 模型再补此项。
 
 ### 3.2 开发与运维
 
 | 任务 | Owner | 完成标准 |
 | --- | --- | --- |
 | 搭建 CI/CD 流水线（镜像构建、单测、lint、部署到测试环境） | DevOps | main 分支 push 自动触发，全流程 < 10 分钟 |
-| 部署可观测平台（OpenTelemetry Collector + Langfuse） | DevOps + 算法 | Trace 端到端可视化：query → 检索结果 → prompt → 输出 |
 | 搭建 Prompt Git 仓库，规范 Tag 命名（`prompt-v{n}`） | 算法 | 仓库初始化，首个 Tag 打出 |
-| 配置 APM 告警（首字延迟 > 2s、错误率 > 1% 触发通知） | DevOps | 告警规则验证通过 |
+| 约定结构化日志字段规范（见 §3.12），确保关键 Trace 字段落盘 | 算法 + 后端 | 日志抽样检查字段齐全 |
+
+> 可观测平台（Langfuse + OpenTelemetry + Prometheus + Grafana）、APM 告警暂不部署，P1 先靠结构化日志排查问题；P2 流量规模上来后再引入（见 §3.12）。
 
 ### 3.3 安全前置
 
@@ -391,11 +415,11 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 > 候选方案与选型依据详见 §3；本节为 P0 阶段的**落地确认任务**，核心工作是 benchmark 数据实测和最终决策。
 
 - [ ] **Embedding 模型**：以 BGE-M3 为基准，对比 BCE-Embedding-Base-V1 及一个 API 方案，在金标数据集上跑 Recall@5，取最优（§3.2）
-- [ ] **Rerank 模型**：部署 BGE-Reranker-v2-m3，**实测标定相关性阈值**（用负样本集，取 FPR < 5% 的分数下限）（§3.3）
+- [ ] **Rerank 模型**：P1 暂不引入（见 §3.3），此处仅确认 P2 候选和阈值标定方法，不在 P0 部署
 - [ ] **向量库**：P1 起步确认用 PGVector；若预估 chunk 数 > 50 万，同步评估 Qdrant 并制定迁移计划（§3.4）
 - [ ] **编排框架**：确认 LangGraph（编排）+ LlamaIndex（知识管道）组合；若已有 Dify 环境可先用于内部原型演示，不作为生产编排层（§3.6）
-- [ ] **LLM 接口**：完成 LiteLLM 网关部署，配置主备模型（Claude Sonnet → GPT-4o），流式输出联通测试（§3.11）
-- [ ] **内容安全 API**：开通阿里云内容安全账号，完成接口调通，配置自定义业务敏感词词库（§3.9）
+- [ ] **LLM 接口**：确认网关方案（LiteLLM 统一网关 vs. 直连各家 SDK，见 §3.11）；若选 LiteLLM，按 config/litellm.yaml 的 `claude-chat → gpt4o-chat → qwen-chat` fallback 链完成部署联通测试，若直连 SDK 则在 `generate_node` 里明确调用方式
+- [ ] **内容安全 API**：P1 先用本地敏感词词典验证（见 §3.9），本项仅做阿里云内容安全账号开通与接口调通预研，不在 P1 接入
 
 **交付物**：`技术选型报告.md`，含 benchmark 数据、最终选型与理由；Rerank 阈值标定结果写入该报告
 
@@ -428,9 +452,10 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
   - 每 chunk 前置面包屑（文档名 > 一级标题 > 二级标题）
   - 写入 `parent_chunk_id`，父级内容存入本地文件系统（路径写入元数据，存储层通过抽象接口访问，便于后续迁移）
 - [ ] 实现 Chunk 元数据写入（参照 design.md §3.3 规范），含 `acl`、`effective_from/to`、`region`
-- [ ] 部署 Embedding 服务，完成 P0 通过知识的首批向量化入库
-- [ ] 构建 BM25 倒排索引（Elasticsearch 或 Tantivy）
+- [ ] 部署 Embedding 服务，完成 P0 通过知识的首批向量化入库（`inference/embedding.py` 已按 Protocol 抽象出可插拔 backend，选型确定后只需实现 `load_embedding_model()`，无需改调用点）
 - [ ] 实现**事件驱动更新**：文档变更 → 解析 → 切分 → Embedding → 增量写库（验收：文本型文档端到端 ≤ 15 分钟）
+
+> BM25 倒排索引（Elasticsearch/Tantivy）P1 暂不构建：P1 走单路向量检索（见 5.2），混合检索延后到 P2（§6.1），避免 P1 多起一个检索服务。
 
 **知识运营**
 
@@ -441,19 +466,19 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 **算法工程师**
 
 - [ ] 实现 Query 改写（指代消解 + 拼写归一）：规则模板为主，**不走 LLM**，保证延迟 ≤ 200ms
-- [ ] 实现向量检索（单路，Top-50），ACL + 生效期元数据过滤**在向量库 where 条件中执行**
-- [ ] 实现 Rerank 服务，标定阈值（使用 P0 确定的值），Top-6 进入生成
+- [ ] 实现向量检索（单路，Top-6 直出），ACL + 生效期元数据过滤**在向量库 where 条件中执行**（Rerank 暂不引入，见 §3.3；召回效果不足再评估引入）
 - [ ] 实现上下文组装：相关性降序，首尾放高分片段，序号引用标注，知识 ≤ 60% / 历史 ≤ 20% / 指令 ≤ 20%
 - [ ] 编写 System Prompt v1（基于 design.md §5.1 模板），打 Git Tag `prompt-v1`
+- [ ] 接入 LLM 生成调用，替换 `generate_node` 里的 TODO 占位：若走 LiteLLM 网关，调用 `config/litellm.yaml` 里的 `claude-chat`（已配好 `gpt4o-chat`/`qwen-chat` fallback）；若直连 SDK 则在该节点内直接调用，两种方案不改函数签名
 - [ ] 实现流式输出 + 引用卡片组装
 
 **后端工程师**
 
 - [ ] 实现编排服务骨架（安全过滤 → FAQ 匹配 → 意图识别 → RAG → 流式输出）
-- [ ] 实现 FAQ 精准匹配（倒排索引，延迟 ≤ 20ms）
+- [ ] 实现 FAQ 精准匹配（进程内倒排索引，延迟 ≤ 20ms；不依赖 Redis，见 §3.13）
 - [ ] 轻量意图分类（规则 / 小分类模型，延迟 ≤ 50ms，区分：知识咨询 / 业务查询 / 闲聊 / 投诉）
-- [ ] 实现会话管理（session_id、历史存储、滚动摘要，保留最近 5 轮原文）
-- [ ] 实现 Langfuse trace 埋点（query → chunks → prompt → 输出 全链路）
+- [ ] 实现会话管理（session_id、历史存储、滚动摘要，保留最近 5 轮原文；单实例应用内存承载，见 §3.13）
+- [ ] 实现结构化日志埋点（query → chunks → prompt → 输出 全链路，字段见 §3.12，为 P2 平滑迁移 Langfuse 做准备）
 
 **前端工程师**
 
@@ -462,8 +487,9 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 **DevOps**
 
-- [ ] 配置 HPA 自动扩缩容（编排服务、Embedding 服务、Rerank 服务）
 - [ ] 验证延迟预算拆解（在测试环境跑各环节 P95，对照 design.md §1.2 延迟表）
+
+> HPA 自动扩缩容 P1 暂不配置：单实例 + 应用内存会话状态（见 §3.13），多实例前必须先把会话状态切到 Redis，否则扩容会丢会话，留到 P2 一并做。
 
 ### P1 门控评审
 
@@ -485,7 +511,7 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 **算法工程师**
 
-- [ ] 接入 BM25 检索，实现 RRF 融合（`score = Σ 1/(60 + rank_i)`，双路各 Top-50 → 合并后 Rerank）
+- [ ] 接入 BM25 检索，实现 RRF 融合（`score = Σ 1/(60 + rank_i)`，双路各 Top-50 → 合并后 Rerank）；启用时把 `.env` 的 `ENABLE_RERANK` 设为 `true`，镜像构建加 `--build-arg INSTALL_P2_DEPS=true`（见 app/Dockerfile）以安装 FlagEmbedding/transformers/torch
 - [ ] 实现多查询扩展（同义问法 2~3 路并行，合并后统一 Rerank，注意合并重复 chunk）
 - [ ] 实现元数据过滤完整链路：`acl` / `region` / `effective_to` 三重过滤，验证越权场景被拦截
 - [ ] 在金标数据集上对比混合检索 vs 纯向量检索，确认 Recall@5 提升
@@ -517,7 +543,7 @@ P2 后期 → 超过 50 万 chunk 时提前评估迁移 Qdrant
 
 **算法工程师**
 
-- [ ] 实现异步 NLI 引用校验（小模型，不阻断流式输出；高风险字段不一致时追加提示 + 触发人工复核工单）
+- [ ] 实现异步 NLI 引用校验（小模型，不阻断流式输出；高风险字段不一致时追加提示 + 触发人工复核工单）；启用时把 `.env` 的 `ENABLE_NLI` 设为 `true`（同样需要 `--build-arg INSTALL_P2_DEPS=true`）
 - [ ] 实现数字/日期/金额正则比对（不一致时回退到"引用原文"模式）
 - [ ] 部署语义缓存（阈值初设 0.93，基于线上流量 A/B 测试标定最优值）
 - [ ] 在金标数据集上跑忠实度（Faithfulness）+ 引用正确率评测，基准存档

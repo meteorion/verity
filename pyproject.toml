@@ -3,7 +3,27 @@ name = "verity"
 version = "0.1.0"
 description = "Enterprise RAG intelligent customer service system"
 requires-python = ">=3.12"
-dependencies = []
+# P1 最小依赖：只列当前代码实际用到的包（跑通 API + LangGraph 编排骨架 + PGVector 读写 +
+# 本地 Embedding + 直连 Qwen 生成）。Rerank/NLI（FlagEmbedding/transformers 之外的部分）、
+# 文档解析（marker-pdf/llama-index-core）、P2 基础设施（redis/langfuse）等重依赖按
+# doc/plan.md 对应 TODO 落地节奏引入，先不预装，见 app/Dockerfile 里 INSTALL_P2_DEPS 分组。
+#
+# langgraph 固定到 1.* 而不是更早的 0.2.*：get_stream_writer()/custom stream mode 等
+# generate_node 依赖的 API 已经在 1.2.10 上实测验证过，没有验证过 0.2.x 是否兼容。
+dependencies = [
+    "fastapi==0.115.*",
+    "uvicorn[standard]==0.32.*",
+    "langgraph==1.*",
+    "asyncpg==0.30.*",
+    "pgvector==0.3.*",
+    "httpx==0.28.*",
+    "pydantic==2.*",
+    "pydantic-settings==2.*",
+    "typing-extensions>=4.12",
+    "sentence-transformers==3.*",
+    "torch==2.5.*",
+    "openai==1.*",
+]
 
 [tool.ruff]
 line-length = 100

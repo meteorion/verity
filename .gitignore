@@ -20,6 +20,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+.venv-smoke/
 venv/
 env/
 dist/

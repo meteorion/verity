@@ -3,8 +3,8 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档名称 | 架构设计文档 |
-| 版本 | V1.1 |
-| 变更说明 | V1.0 → V1.1：服务拆分调整为单服务单进程，降低 V1 运维复杂度 |
+| 版本 | V1.3 |
+| 变更说明 | V1.0 → V1.1：服务拆分调整为单服务单进程，降低 V1 运维复杂度；V1.1 → V1.2：修正脚手架代码与 P1 最小成本决策的落地缺口——FAQ 索引改为进程内（§6.2），Rerank/NLI 改为开关控制的延迟加载（不装依赖也能起 P1）；V1.2 → V1.3：P1 问答链路（安全过滤→FAQ→检索→生成→SSE）实际跑通，Embedding/LLM 接入先用可插拔的实用默认值（§1.2），chunks 表 DDL 落到 `app/db.py` |
 | 关联文档 | design.md V1.1 / plan.md V1.0 |
 | 读者对象 | 架构师、后端工程师、算法工程师、DevOps |
 
@@ -31,10 +31,13 @@
 | RAG vs 全文投喂 | RAG | 知识可更新、可溯源、降 Token 成本 |
 | 编排框架 | LangGraph | 有状态图、条件分支、流式输出原生支持 |
 | 向量库（P1） | PGVector | 运维成本最低，< 100 万 chunk 足够 |
-| Embedding | BGE-M3 | 密集 + 稀疏双输出，无需独立 BM25 服务 |
+| Embedding | 正式选型待 P0 benchmark（见 doc/plan.md §3.2）；代码里先用 sentence-transformers 本地小模型跑通链路 | 本文档后续 BGE-M3 相关细节（维度/GPU 显存/时序图标注）待选型确定后统一回填；`inference/embedding.py` 已抽象成可插拔 backend，换模型不用改调用点 |
 | 文件存储 | 本地文件系统（路径抽象） | 暂不引入对象存储，后续可平滑迁移 |
-| LLM 接入 | LiteLLM 网关统一代理 | 多模型路由、限流、成本计量、故障切换 |
+| LLM 接入 | 网关方案待确认（见 doc/plan.md §3.11）；代码里先直连通义千问 `qwen-plus` 跑通生成 | 本文档后续 LiteLLM 相关细节（C4 图/时序图/compose 定义）待方案确认后统一回填；`inference/llm.py` 已抽象成单一 `stream_chat()` 接口，换网关/模型不用改调用点 |
 | **V1 服务粒度** | **单服务（Monolith）** | **V1 体量不大，单进程无 RPC 开销，运维最简；接口已定义可按需拆分** |
+| Rerank（P1） | 暂不引入 | 最小成本原则：不自建 GPU 服务，见 doc/plan.md §3.3；本文档 Cross-Encoder 精排相关描述待 P2 引入时生效 |
+| 会话状态（P1） | 应用内存（单实例） | 最小成本原则：暂不引入 Redis，见 doc/plan.md §3.13；本文档 Redis 会话相关描述待 P2 多实例化时生效 |
+| 可观测（P1） | 结构化日志 | 最小成本原则：暂不部署 Langfuse/OTel/Prometheus/Grafana，见 doc/plan.md §3.12 |
 
 ---
 
@@ -341,6 +344,11 @@ flowchart LR
 
 #### Chunk 元数据 Schema
 
+> 实际建表 DDL 见 `app/db.py`（幂等 `CREATE TABLE IF NOT EXISTS`，P1 暂不引入迁移框架）。
+> `embedding` 维度取决于 Embedding 选型：P1 默认 sentence-transformers 的
+> `paraphrase-multilingual-MiniLM-L12-v2`（384 维，只有密集向量），下面的 `vector(1024)` /
+> `sparse_vector` 是 P0 正式选定 BGE-M3 类模型后的目标形态，换模型需要重建索引（蓝绿策略，见 §5.4）。
+
 ```sql
 CREATE TABLE chunks (
     chunk_id        TEXT PRIMARY KEY,           -- "doc_10231#p3_c02"
@@ -358,8 +366,8 @@ CREATE TABLE chunks (
     effective_to    TIMESTAMPTZ,
     acl             TEXT[],
     updated_at      TIMESTAMPTZ NOT NULL,
-    embedding       vector(1024),               -- BGE-M3 密集向量
-    sparse_vector   sparsevec(30522)            -- BGE-M3 稀疏向量
+    embedding       vector(1024),               -- BGE-M3 密集向量（P0 选型确定后的目标维度）
+    sparse_vector   sparsevec(30522)            -- BGE-M3 稀疏向量（P2 混合检索才用到）
 );
 
 CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops)
@@ -434,7 +442,7 @@ CREATE TABLE documents (
 );
 ```
 
-### 6.2 Redis Schema
+### 6.2 Redis Schema（P2+，见 §1.2 会话状态决策）
 
 ```
 # 会话状态（LangGraph 持久化，TTL 24h）
@@ -445,9 +453,13 @@ session:{session_id}:summary  String { summary_text }
 cache:query:{hash}            Hash   { query_vec(bytes), answer_json, created_at }
                               向量索引 FT.CREATE ON HASH PREFIX cache:query:
 
-# FAQ 索引（精准匹配，倒排）
+# FAQ 索引（精准匹配，倒排）—— P2 多实例化后从进程内索引迁移过来
 faq:{id}                      Hash   { question, answer, intent, product_line }
 ```
+
+**FAQ 索引（P1）**：单实例阶段不引入 Redis，`faq_node` 启动时从本地 JSON 文件（`FAQ_INDEX_PATH`，默认
+`/data/rag/faq/faq.json`）加载进程内 dict，见 `app/graph/nodes/faq.py`。P2 多实例化时，把索引读写实现
+换成上面的 `faq:{id}` Hash 即可，`faq_node` 对外接口不变。
 
 ### 6.3 本地文件系统
 
@@ -819,6 +831,9 @@ GET  /api/ops/metrics                # 知识库健康指标
 | `ANTHROPIC_API_KEY` | Claude API 密钥 | sk-ant-... |
 | `OPENAI_API_KEY` | GPT fallback 密钥 | sk-... |
 | `EMBEDDING_MODEL_PATH` | BGE-M3 模型路径 | /models/bge-m3 |
+| `ENABLE_RERANK` | 是否加载 Rerank 模型（P1 默认 false，见 §1.2） | false |
+| `ENABLE_NLI` | 是否加载 NLI 校验模型（P1 默认 false，见 §1.2） | false |
+| `FAQ_INDEX_PATH` | FAQ 进程内索引 JSON 文件路径（P1，见 §6.2） | /data/rag/faq/faq.json |
 | `RERANK_MODEL_PATH` | BGE-Reranker 模型路径 | /models/bge-reranker-v2-m3 |
 | `RERANK_THRESHOLD` | 标定后精排阈值 | 0.38 |
 | `SEMANTIC_CACHE_THRESHOLD` | 语义缓存命中阈值 | 0.93 |

@@ -10,7 +10,7 @@
 
 | 功能 | 说明 |
 | --- | --- |
-| **混合检索** | BGE-M3 密集向量 + 稀疏向量双路并发，RRF 融合后 Cross-Encoder 精排，兼顾语义理解与关键词精确命中 |
+| **检索** | P1 单路密集向量检索（本地 Embedding 模型，未经 P0 正式 benchmark）；P2 引入稀疏向量/BM25 双路并发 + RRF 融合 + Cross-Encoder 精排，兼顾语义理解与关键词精确命中 |
 | **引用可溯源** | 每条答案强制标注知识来源编号，附文档标题与链接，支持用户点击核查 |
 | **幻觉抑制** | 无相关知识不生成；生成后异步 NLI 校验引用真实性；金额/时效正则比对 |
 | **知识热更新** | 文档变更事件驱动，文本型文档端到端生效 ≤ 15 分钟，无需重启服务 |
@@ -37,17 +37,18 @@
 
 | 层次 | 选型 |
 | --- | --- |
-| 编排框架 | [LangGraph](https://github.com/langchain-ai/langgraph) + [LlamaIndex](https://github.com/run-llama/llama_index)（知识管道） |
-| 大模型 | Claude Sonnet API（LiteLLM 统一网关代理，支持 fallback） |
-| Embedding | [BGE-M3](https://huggingface.co/BAAI/bge-m3)（密集 + 稀疏双输出） |
-| Rerank | [BGE-Reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) |
+| 编排框架 | [LangGraph](https://github.com/langchain-ai/langgraph) 1.x + [LlamaIndex](https://github.com/run-llama/llama_index)（知识管道，落地中） |
+| 大模型 | P1 直连通义千问 `qwen-plus`（DashScope OpenAI 兼容模式，见 `app/inference/llm.py`）；网关方案（LiteLLM vs 直连 SDK）仍待确认，见 [doc/plan.md](doc/plan.md) §3.11 |
+| Embedding | P1 本地默认 [paraphrase-multilingual-MiniLM-L12-v2](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2)（sentence-transformers，CPU，未经 P0 正式 benchmark，候选见 [doc/plan.md](doc/plan.md) §3.2），只出密集向量 |
+| Rerank | P1 暂不引入（向量相似度排序直出，见 [doc/plan.md](doc/plan.md) §3.3），P2 视召回效果评估 BGE-Reranker-v2-m3 |
 | 向量库 | [PGVector](https://github.com/pgvector/pgvector)（PostgreSQL 扩展） |
-| 缓存 | [Redis Stack](https://redis.io/docs/stack/)（会话状态 + 语义缓存） |
-| 文档解析 | [Marker](https://github.com/VikParuchuri/marker)（文字 PDF）/ [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)（扫描件） |
-| NLI 校验 | [chinese-roberta-wwm-ext](https://huggingface.co/hfl/chinese-roberta-wwm-ext)（异步，CPU） |
-| 意图分类 | FastText fine-tune（CPU，< 5ms） |
-| LLM 网关 | [LiteLLM](https://github.com/BerriAI/litellm) |
-| 可观测 | [Langfuse](https://langfuse.com)（Trace）+ OpenTelemetry + Prometheus + Grafana |
+| 会话/缓存 | P1 应用内存（单实例），P2 切 [Redis Stack](https://redis.io/docs/stack/)（多实例会话 + 语义缓存） |
+| 文档解析 | [Marker](https://github.com/VikParuchuri/marker)（文字 PDF）/ [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)（扫描件），落地中，见下方"知识入库" |
+| NLI 校验 | P1 暂不引入（P2 幻觉抑制专项，见 §3.8），届时用 [chinese-roberta-wwm-ext](https://huggingface.co/hfl/chinese-roberta-wwm-ext)（异步，CPU） |
+| 意图分类 | FastText fine-tune（CPU，< 5ms），落地中，P1 先固定返回 `rag` |
+| 内容安全 | P1 本地敏感词词典（`SAFETY_BLOCKLIST` 逗号分隔，零成本），P2 视红队结果叠加商用 API |
+| LLM 网关 | 待确认（暂不确定使用 [LiteLLM](https://github.com/BerriAI/litellm)，见 [doc/plan.md](doc/plan.md) §3.11） |
+| 可观测 | P1 结构化日志，P2 引入 [Langfuse](https://langfuse.com) + OpenTelemetry + Prometheus + Grafana |
 | 部署 | Docker Compose（单机） |
 | 运行时 | Python ≥ 3.12 |
 
@@ -73,7 +74,7 @@ verity/
 │   │   ├── graph.py            # LangGraph 状态图定义
 │   │   └── nodes/              # safety / faq / intent / rag / tool / generate / transfer
 │   ├── retrieval/
-│   │   ├── hybrid.py           # RRF 混合检索（dense + sparse）
+│   │   ├── hybrid.py           # P1 单路 dense 检索；RRF 混合检索（+ sparse）P2 引入
 │   │   ├── cache.py            # 语义缓存（Redis Stack）
 │   │   └── small_to_big.py     # 父级 chunk 回查（本地 FS）
 │   ├── pipeline/
@@ -81,19 +82,22 @@ verity/
 │   │   ├── chunker.py          # 层级切分 + 面包屑注入
 │   │   ├── embedder.py         # 批量向量化（调用 inference）
 │   │   └── indexer.py          # PGVector 写库
+│   ├── db.py                    # PGVector 幂等 DDL（chunks 表 + HNSW 索引）
+│   ├── scripts/
+│   │   └── seed_dummy_chunks.py # 手动灌 dummy chunk，管道没写完前先验证问答链路
 │   └── inference/
-│       ├── embedding.py        # BGE-M3（进程内加载）
-│       ├── rerank.py           # BGE-Reranker（进程内加载）
-│       └── nli.py              # chinese-roberta NLI（异步，CPU）
+│       ├── embedding.py        # 本地 sentence-transformers（进程内加载，可插拔 backend）
+│       ├── llm.py              # 直连 Qwen 生成调用（可插拔，见 doc/plan.md §3.11）
+│       ├── rerank.py           # BGE-Reranker（P2，ENABLE_RERANK 开关）
+│       └── nli.py              # chinese-roberta NLI（P2，ENABLE_NLI 开关）
 │
 ├── config/
 │   ├── nginx.conf
-│   └── litellm.yaml            # LLM 网关路由（含 fallback）
+│   └── litellm.yaml            # LLM 网关路由参考配置（是否采用待确认，见 doc/plan.md §3.11）
 │
-├── models/                     # 本地模型文件（不提交 Git）
-│   ├── bge-m3/
-│   ├── bge-reranker-v2-m3/
-│   └── chinese-roberta-nli/
+├── models/                     # P2 模型文件（不提交 Git）；P1 的 Embedding 模型走 HF 缓存，不放这里
+│   ├── bge-reranker-v2-m3/     # 仅 ENABLE_RERANK=true 时需要
+│   └── chinese-roberta-nli/    # 仅 ENABLE_NLI=true 时需要
 │
 ├── data/rag/                   # 运行时知识文件（不提交 Git）
 │   ├── raw/                    # 原始上传文档
@@ -139,77 +143,105 @@ verity/
 
 ## 快速开始
 
-> **当前状态**：项目处于设计阶段，服务代码尚未实现。以下为目标启动流程。
+> **当前状态**：P1 问答链路（安全过滤 → FAQ → 向量检索 → LLM 生成 → SSE 流式输出）已跑通，
+> 知识入库管道（文档解析/切分，见 `pipeline/parser`、`chunker.py`）仍是 TODO 占位，
+> 检索前先用 `scripts/seed_dummy_chunks.py` 手动灌几条数据，见下方"验证问答链路"。
 
 ### 前置条件
 
 - Docker & Docker Compose v2
 - Python 3.12+（本地开发）
-- （推荐）NVIDIA GPU，驱动 ≥ 535，安装 [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+- 通义千问 API Key（[DashScope 控制台](https://dashscope.console.aliyun.com/)申请），P1 生成节点必需
+- 不需要 GPU：本地 Embedding 和生成调用都是 CPU / 远程 API
 
 ### 环境配置
 
 ```bash
 cp .env.example .env
 # 编辑 .env，填入以下必要配置：
-#   ANTHROPIC_API_KEY      Claude API 密钥
+#   QWEN_API_KEY           DashScope API Key，generate_node 直接依赖它
 #   POSTGRES_PASSWORD      数据库密码
-#   RERANK_THRESHOLD       Rerank 阈值（P0 阶段实测标定后填入）
 ```
 
 ### 下载模型
 
-```bash
-# BGE-M3
-huggingface-cli download BAAI/bge-m3 --local-dir ./models/bge-m3
+P1 默认的本地 Embedding 模型（`EMBEDDING_MODEL_PATH`，见 `.env.example`）首次启动时由
+sentence-transformers 自动从 HF Hub 下载到容器内缓存，不需要手动下载，但首次启动需要网络访问。
 
-# BGE-Reranker-v2-m3
+以下两个模型只在对应能力打开时才需要，P1 不必下载：
+
+```bash
+# BGE-Reranker-v2-m3 —— 仅当 .env 里 ENABLE_RERANK=true 时需要（P2，见 doc/plan.md §3.3）
 huggingface-cli download BAAI/bge-reranker-v2-m3 --local-dir ./models/bge-reranker-v2-m3
 
-# NLI 校验模型
+# NLI 校验模型 —— 仅当 .env 里 ENABLE_NLI=true 时需要（P2，见 doc/plan.md §3.8）
 huggingface-cli download hfl/chinese-roberta-wwm-ext --local-dir ./models/chinese-roberta-nli
 ```
 
 ### 启动服务
 
 ```bash
-# 启动全部服务（按依赖顺序自动处理）
+# P1 最小成本启动：只起 postgres + app，镜像也只装当前代码用得到的最小依赖
+# （FlagEmbedding/transformers/torch/redis/langfuse 等重依赖默认不装，见 app/Dockerfile）
 docker compose up -d
+
+# 需要 Rerank/NLI（ENABLE_RERANK/ENABLE_NLI=true）等 P2 重依赖时，构建镜像加这个 build-arg：
+# docker compose build --build-arg INSTALL_P2_DEPS=true app
 
 # 查看各服务状态
 docker compose ps
 
-# 查看编排服务日志
-docker compose logs -f orchestration
+# 查看应用服务日志
+docker compose logs -f app
+
+# 需要 redis / litellm / langfuse / nginx（P2+ 能力）时，加 profile 一起拉起：
+docker compose --profile p2 up -d
 ```
 
 ### 访问入口
 
 | 地址 | 说明 |
 | --- | --- |
-| `https://localhost` | 用户 Web 客服界面 |
-| `http://localhost:8080` | 知识运营后台（文档管理） |
-| `http://localhost:3000` | Langfuse（Trace 可视化，建议限内网） |
-| `http://localhost:4000` | LiteLLM 网关（API 文档） |
+| `http://localhost:8000` | 应用服务（API + `/health`），P1 直接访问，不经 nginx |
+| `http://localhost:8080` | 知识运营后台（文档管理，前端 dev server 或后续接入 nginx） |
+| `http://localhost:3000` | Langfuse（P2+，`--profile p2` 才会起） |
+| `http://localhost:4000` | LiteLLM 网关（P2+，是否采用待确认，`--profile p2` 才会起） |
 
 ---
 
 ## 开发说明
 
-### 运行单个服务（本地开发）
+### 本地运行（不经 Docker）
+
+代码按 `app/` 为 import 根目录组织（`from graph...`、`from inference...`），不是一个可
+`pip install -e .` 的分发包，依赖直接装：
 
 ```bash
-cd services/retrieval
-pip install -e ".[dev]"
-uvicorn main:app --reload --port 8002
+cd app
+pip install fastapi "uvicorn[standard]" langgraph asyncpg pgvector httpx \
+  pydantic pydantic-settings "typing-extensions>=4.12" sentence-transformers openai
+uvicorn main:app --reload --port 8000
 ```
 
-### 知识入库
+### 验证问答链路
+
+知识入库管道（解析/切分）还是 TODO 占位，检索前先手动灌几条 dummy chunk：
 
 ```bash
-# 将文档放入 data/rag/raw/ 后，通过知识运营后台上传
-# 或直接调用管道服务 API：
-curl -X POST http://localhost:8004/ingest \
+docker compose exec app python scripts/seed_dummy_chunks.py
+
+curl -N -X POST http://localhost:8000/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "s_test_0001", "message": "生鲜坏了还能退吗"}'
+# SSE 输出：一串 {"type":"token",...}，最后一条 {"type":"done","citations":[...]}
+```
+
+### 知识入库（管道未完成，接口已就绪）
+
+```bash
+# pipeline/parser、chunker.py 目前是 TODO 占位（见 doc/plan.md §5.1），
+# 调这个接口不会报错，但产出的 chunk 是空的，实际验证请用上面的 seed 脚本
+curl -X POST http://localhost:8000/api/pipeline/ingest \
   -F "file=@/path/to/document.pdf" \
   -F "doc_id=doc_001" \
   -F "owner=ops@example.com" \

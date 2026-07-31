@@ -1,3 +1,6 @@
+import json
+import uuid
+
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -12,6 +15,10 @@ class ChatRequest(BaseModel):
     options: dict = {}
 
 
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 @router.post("/v1/chat")
 async def chat(req: ChatRequest, request: Request):
     uid = request.headers.get("X-UID")
@@ -19,9 +26,14 @@ async def chat(req: ChatRequest, request: Request):
     region = request.headers.get("X-Region", "default")
 
     graph = request.app.state.graph
+    trace_id = f"tr_{uuid.uuid4().hex[:12]}"
 
     async def event_stream():
-        async for chunk in graph.astream(
+        streamed = False
+        final_state: dict = {}
+        # "custom": generate_node 用 get_stream_writer() 按 token 推送；
+        # "values": 每步之后的完整状态快照，用来兜底（FAQ/转人工没走 custom）和取最终引用/意图。
+        async for mode, chunk in graph.astream(
             {
                 "session_id": req.session_id,
                 "uid": uid,
@@ -29,10 +41,31 @@ async def chat(req: ChatRequest, request: Request):
                 "region": region,
                 "query_raw": req.message,
             },
-            stream_mode="values",
+            stream_mode=["custom", "values"],
         ):
-            if token := chunk.get("answer_stream"):
-                yield f"data: {token}\n\n"
-        yield "data: [DONE]\n\n"
+            if mode == "custom":
+                if token := chunk.get("token"):
+                    streamed = True
+                    yield _sse({"type": "token", "content": token})
+            else:
+                final_state = chunk
+
+        if not streamed and (answer := final_state.get("answer_stream")):
+            yield _sse({"type": "token", "content": answer})
+
+        citations = [
+            {
+                "chunk_id": c.get("chunk_id"),
+                "title": c.get("title"),
+                "source_url": c.get("source_url"),
+            }
+            for c in final_state.get("retrieved_chunks") or []
+        ]
+        yield _sse({
+            "type": "done",
+            "citations": citations,
+            "intent": final_state.get("intent"),
+            "trace_id": trace_id,
+        })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

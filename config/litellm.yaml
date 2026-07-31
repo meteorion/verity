@@ -1,24 +1,33 @@
 model_list:
-  - model_name: chat
+  # 每个部署一个独立 model_name，配合下方 router_settings.fallbacks 做「主力 → 备用」故障切换。
+  # 注意：不要把它们都叫同一个 model_name——那样 routing_strategy 会把它们当对等节点做负载均衡，
+  # 达不到「Claude 主力，故障才切换」的效果（原配置的 bug）。应用侧调 chat 时用主力名 claude-chat。
+  - model_name: claude-chat
     litellm_params:
       model: claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
       timeout: 60
       stream_timeout: 120
 
-  - model_name: chat
+  - model_name: gpt4o-chat
     litellm_params:
       model: gpt-4o
       api_key: os.environ/OPENAI_API_KEY
       timeout: 60
       stream_timeout: 120
 
-  # Private deployment fallback (uncomment when available)
-  # - model_name: chat
-  #   litellm_params:
-  #     model: openai/qwen2.5-72b-instruct
-  #     api_base: http://qwen-vllm:8000/v1
-  #     api_key: EMPTY
+  # 私有化主力先行验证：通过阿里云 DashScope OpenAI 兼容模式调用通义千问。
+  # 实测该 Key 对 qwen2.5-72b-instruct（开源权重托管）返回 access_denied，
+  # 需在 Model Studio 控制台单独开通后才能用；qwen-plus（商用旗舰）已验证可用，先用它占位。
+  # 后续切换自建 vLLM 私有化部署时，把 model 换回 qwen2.5-72b-instruct、
+  # api_base 换成 http://qwen-vllm:8000/v1、api_key 换成 EMPTY
+  - model_name: qwen-chat
+    litellm_params:
+      model: openai/qwen-plus
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key: os.environ/QWEN_API_KEY
+      timeout: 60
+      stream_timeout: 120
 
   - model_name: judge
     litellm_params:
@@ -31,8 +40,9 @@ router_settings:
   num_retries: 2
   retry_after: 5
   fallbacks:
-    - chat:
-        - gpt-4o
+    - claude-chat:
+        - gpt4o-chat
+        - qwen-chat
 
 litellm_settings:
   drop_params: true

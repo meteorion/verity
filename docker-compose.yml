@@ -1,5 +1,9 @@
 name: verity
 
+# P1 最小成本启动：`docker compose up -d` 只起 postgres + app。
+# redis / litellm / langfuse / nginx 打了 p2 profile，P1 暂不需要；
+# 需要时用 `docker compose --profile p2 up -d` 一起拉起。
+
 x-common: &common
   restart: unless-stopped
   networks:
@@ -24,8 +28,10 @@ services:
       timeout: 5s
       retries: 5
 
+  # P2+ 引入：P1 会话状态走应用内存（见 doc/plan.md §3.13），语义缓存也是 P2 功能
   redis:
     <<: *common
+    profiles: ["p2"]
     image: redis/redis-stack:7.4.0-v3
     volumes:
       - ./volumes/redis:/data
@@ -35,9 +41,12 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
 
-  # ---- Layer 2: LLM gateway + Observability ----
+  # ---- Layer 2: LLM gateway + Observability（均为 P2+ 引入，见 doc/plan.md §3.11/§3.12）----
+  # 待启用：LiteLLM 是否作为统一网关尚待确认，服务定义先保留，
+  # app 目前也未真正调用它（generate_node 仍是 TODO 占位）
   litellm:
     <<: *common
+    profiles: ["p2"]
     image: ghcr.io/berriai/litellm:main-stable
     env_file: .env
     volumes:
@@ -49,8 +58,10 @@ services:
       postgres:
         condition: service_healthy
 
+  # P1 用结构化日志代替，见 doc/plan.md §3.12
   langfuse:
     <<: *common
+    profiles: ["p2"]
     image: langfuse/langfuse:2
     env_file: .env
     environment:
@@ -76,10 +87,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      litellm:
-        condition: service_started
+      # redis / litellm 未在 P1 实际调用（会话内存化、生成节点占位），
+      # 依赖随对应功能落地时再加回来，见 doc/plan.md §3.13/§3.11
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -93,8 +102,10 @@ services:
     #           capabilities: [gpu]
 
   # ---- Layer 4: Edge ----
+  # P2+ 引入：P1 直接访问 app:8000 / 前端 dev server 即可，先不加反向代理/TLS 层
   nginx:
     <<: *common
+    profiles: ["p2"]
     image: nginx:1.27-alpine
     ports:
       - "80:80"

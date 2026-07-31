@@ -1,4 +1,4 @@
-"""Batch embedding via in-process BGE-M3."""
+"""Batch embedding via pluggable in-process backend (model 待选型，见 doc/plan.md §3.2)."""
 from typing import Any
 
 from inference.embedding import embed

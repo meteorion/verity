@@ -10,6 +10,10 @@ from graph.nodes.generate import generate_node
 from graph.nodes.transfer import transfer_node
 
 
+def _route_after_safety(state: OrchestratorState) -> str:
+    return "generate" if state.get("blocked") else "faq"
+
+
 def _route_after_intent(state: OrchestratorState) -> str:
     if state.get("faq_hit"):
         return "generate"
@@ -34,7 +38,7 @@ def build_graph() -> StateGraph:
     g.add_node("transfer", transfer_node)
 
     g.set_entry_point("safety")
-    g.add_edge("safety", "faq")
+    g.add_conditional_edges("safety", _route_after_safety)
     g.add_edge("faq", "intent")
     g.add_conditional_edges("intent", _route_after_intent)
     g.add_edge("rag", "generate")

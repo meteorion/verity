@@ -8,6 +8,7 @@ class OrchestratorState(TypedDict):
     region:           str
     query_raw:        str
     query_rewritten:  str | None
+    blocked:          bool
     intent:           str | None
     faq_hit:          bool
     retrieved_chunks: list[dict]
