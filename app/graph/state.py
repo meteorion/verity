@@ -6,6 +6,7 @@ class OrchestratorState(TypedDict):
     uid:              str | None
     roles:            list[str]
     region:           str
+    project_group:    str | None
     query_raw:        str
     query_rewritten:  str | None
     blocked:          bool
@@ -19,4 +20,8 @@ class OrchestratorState(TypedDict):
     answer_stream:    str | None
     nli_flags:        list[dict]
     turn_count:       int
+    transferred:      bool
     transfer_reason:  str | None
+    # Per-request runtime options (set by API layer, read by nodes)
+    top_k:            int | None
+    llm_temperature:  float | None

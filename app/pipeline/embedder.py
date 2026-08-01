@@ -1,9 +1,12 @@
 """Batch embedding via pluggable in-process backend (model 待选型，见 doc/plan.md §3.2)."""
+import os
 from typing import Any
 
 from inference.embedding import embed
 
-_BATCH_SIZE = 64
+# DashScope text-embedding-v3 limits batches to 10; OpenAI allows 2048.
+# Default to 10 for broad compatibility; override with EMBEDDING_BATCH_SIZE.
+_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "10"))
 
 
 async def embed_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:

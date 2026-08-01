@@ -4,9 +4,11 @@ models/
 # Runtime data
 data/
 
-# Frontend build output
+# Frontend build output & deps (all UI packages: frontend/, admin-ui/, chat-ui/)
 frontend/dist/
-frontend/node_modules/
+node_modules/
+**/node_modules/
+**/dist/
 
 # Docker volumes
 volumes/

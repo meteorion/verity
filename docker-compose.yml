@@ -1,8 +1,12 @@
 name: verity
 
-# P1 最小成本启动：`docker compose up -d` 只起 postgres + app。
-# redis / litellm / langfuse / nginx 打了 p2 profile，P1 暂不需要；
-# 需要时用 `docker compose --profile p2 up -d` 一起拉起。
+# Profiles
+#   (default)       postgres + redis + app  — dev/API mode, no GPU needed
+#   --profile obs   + litellm + langfuse    — LLM gateway + trace UI
+#   --profile prod  + nginx                 — TLS edge proxy for production
+#
+# Quick-start (dev):   docker compose up -d
+# Full production:     docker compose --profile obs --profile prod up -d
 
 x-common: &common
   restart: unless-stopped
@@ -10,7 +14,7 @@ x-common: &common
     - verity-net
 
 services:
-  # ---- Layer 1: Storage ----
+  # ---- Layer 1: Storage (always started) ----
   postgres:
     <<: *common
     image: pgvector/pgvector:pg16
@@ -18,35 +22,34 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - ./volumes/postgres:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # P2+ 引入：P1 会话状态走应用内存（见 doc/plan.md §3.13），语义缓存也是 P2 功能
   redis:
     <<: *common
-    profiles: ["p2"]
+    # Redis Stack adds vector search (needed for semantic cache in production).
+    # Override with redis:7-alpine in dev if you skip semantic cache.
     image: redis/redis-stack:7.4.0-v3
     volumes:
       - ./volumes/redis:/data
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
 
-  # ---- Layer 2: LLM gateway + Observability（均为 P2+ 引入，见 doc/plan.md §3.11/§3.12）----
-  # 待启用：LiteLLM 是否作为统一网关尚待确认，服务定义先保留，
-  # app 目前也未真正调用它（generate_node 仍是 TODO 占位）
+  # ---- Layer 2: Optional — LLM gateway + Observability (--profile obs) ----
   litellm:
     <<: *common
-    profiles: ["p2"]
+    profiles: [obs]
     image: ghcr.io/berriai/litellm:main-stable
     env_file: .env
     volumes:
@@ -58,10 +61,9 @@ services:
       postgres:
         condition: service_healthy
 
-  # P1 用结构化日志代替，见 doc/plan.md §3.12
   langfuse:
     <<: *common
-    profiles: ["p2"]
+    profiles: [obs]
     image: langfuse/langfuse:2
     env_file: .env
     environment:
@@ -74,7 +76,7 @@ services:
       postgres:
         condition: service_healthy
 
-  # ---- Layer 3: Application ----
+  # ---- Layer 3: Application (always started) ----
   app:
     <<: *common
     build: ./app
@@ -87,13 +89,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      # redis / litellm 未在 P1 实际调用（会话内存化、生成节点占位），
-      # 依赖随对应功能落地时再加回来，见 doc/plan.md §3.13/§3.11
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
-      start_period: 90s   # wait for model loading
-    # Uncomment to enable GPU:
+      # API mode (EMBEDDING_PROVIDER=api): ~10s.  Local mode: ~90s for model loading.
+      start_period: ${APP_START_PERIOD:-30s}
+    # GPU: uncomment when EMBEDDING_PROVIDER=local or RERANK_PROVIDER=local
     # deploy:
     #   resources:
     #     reservations:
@@ -101,11 +104,10 @@ services:
     #         - driver: nvidia
     #           capabilities: [gpu]
 
-  # ---- Layer 4: Edge ----
-  # P2+ 引入：P1 直接访问 app:8000 / 前端 dev server 即可，先不加反向代理/TLS 层
+  # ---- Layer 4: Optional — TLS edge proxy (--profile prod) ----
   nginx:
     <<: *common
-    profiles: ["p2"]
+    profiles: [prod]
     image: nginx:1.27-alpine
     ports:
       - "80:80"

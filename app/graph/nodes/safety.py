@@ -1,15 +1,33 @@
-"""安全过滤 — P1 只用本地敏感词词典（见 doc/plan.md §3.9），P1 不接商用付费 API。"""
+import logging
 import os
 
 from graph.state import OrchestratorState
 
-_BLOCKLIST = [w.strip() for w in os.getenv("SAFETY_BLOCKLIST", "").split(",") if w.strip()]
-_REJECT_MESSAGE = "很抱歉，我无法回答这个问题，请换个问法，或联系人工客服。"
+logger = logging.getLogger(__name__)
+
+_DEFAULT_BLOCKED = ["fuck", "shit", "傻逼", "操你", "垃圾服务", "去死", "骗子"]
+
+
+def _load_blocked_words() -> list[str]:
+    env_val = os.getenv("SAFETY_BLOCKED_WORDS", "")
+    if env_val.strip():
+        return [w.strip() for w in env_val.split(",") if w.strip()]
+    return _DEFAULT_BLOCKED
 
 
 async def safety_node(state: OrchestratorState) -> dict:
-    # TODO: 换成 AC 自动机做多模式匹配（词典变大后逐词 `in` 扫描会变慢），见 §3.9
-    query = state["query_raw"]
-    if any(word in query for word in _BLOCKLIST):
-        return {"blocked": True, "answer_stream": _REJECT_MESSAGE}
-    return {"blocked": False}
+    blocked_words = _load_blocked_words()
+    query_lower = state["query_raw"].lower()
+
+    for word in blocked_words:
+        if word.lower() in query_lower:
+            logger.warning(
+                "Query blocked [session=%s uid=%s matched=%r]",
+                state.get("session_id"), state.get("uid"), word,
+            )
+            return {
+                "answer_stream": "很抱歉，您的问题包含不当内容，无法回答。如需帮助请联系人工客服。",
+                "intent": "reject",
+            }
+
+    return {}

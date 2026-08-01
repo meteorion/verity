@@ -125,6 +125,55 @@ graph TB
 | LiteLLM | `ghcr.io/berriai/litellm` | LLM 统一代理：模型路由、fallback、限流、成本计量 | 4000 |
 | Langfuse | `langfuse/langfuse:2` | Trace 可视化、Prompt 版本管理、评分数据集 | 3000 |
 
+### 3.3 推理提供者与启动配置（最低成本快速验证原则）
+
+V1 架构在推理层引入 **Provider 模式**，通过环境变量切换实现，接口不变、成本阶梯清晰。
+
+#### 提供者矩阵
+
+| 模块 | 环境变量 | `api` / `none`（默认） | `local`（生产） |
+| --- | --- | --- | --- |
+| Embedding | `EMBEDDING_PROVIDER` | OpenAI-compatible API，零 GPU | BGE-M3 进程内，~2 GB VRAM |
+| Rerank | `RERANK_PROVIDER` | `none`：跳过精排，保留 RRF 顺序 | BGE-Reranker-v2-m3，~1.5 GB VRAM |
+| NLI 校验 | `NLI_PROVIDER` | `none`：跳过引用校验 | chinese-roberta，CPU 异步 |
+| LLM 生成 | `LLM_PROVIDER` | `anthropic`：直调 Anthropic SDK | `litellm`：网关路由 + fallback |
+
+> **关键约束**：`api/none` 模式与 `local` 模式的接口签名完全相同（`embed()` / `rerank()` / `nli_check()`），节点代码无须修改，切换只改环境变量。
+
+#### 启动配置对比
+
+| 维度 | P0/P1 开发（API 模式） | P2+ 生产（Local 模式） |
+| --- | --- | --- |
+| 容器数 | 3（postgres + redis + app） | 6（+ litellm + langfuse + nginx） |
+| 启动时间 | ~10 s | ~90 s（等待模型加载） |
+| GPU 需求 | 无 | 1× T4 / L4（4 GB VRAM） |
+| 模型下载 | 无 | BGE-M3 + Reranker + NLI（合计 ~5 GB） |
+| Embedding 成本 | ~$0.02 / 1M tokens（API） | 电力 + 折旧（GPU 闲置时趋近 $0） |
+| 稀疏检索 | 纯密集检索 | 密集 + 稀疏（BGE-M3 双输出） |
+
+#### Docker Compose Profile 说明
+
+```bash
+# 默认（仅 postgres + redis + app，API 推理）
+docker compose up -d
+
+# 加可观测性（+ litellm + langfuse）
+docker compose --profile obs up -d
+
+# 完整生产（+ nginx TLS）
+docker compose --profile obs --profile prod up -d
+```
+
+#### 扩展路径
+
+当满足以下任一条件时，切换对应模块到 `local`：
+- Embedding 月 API 费用 > ¥500：切换 `EMBEDDING_PROVIDER=local`，重建 PGVector 索引（蓝绿策略）
+- 需要稀疏检索提升长尾召回：切换 `EMBEDDING_PROVIDER=local`（BGE-M3 同时输出密集 + 稀疏向量）
+- 延迟 P95 > 1.5s 且网络 RTT 是瓶颈：切换 `EMBEDDING_PROVIDER=local`
+- 需要精排提升 Faithfulness > 0.90：切换 `RERANK_PROVIDER=local`，先在测试集标定阈值
+
+切换后必须在金标数据集回归集上验证 Recall@5 不下降，再切流量。
+
 ---
 
 ## 4. 关键流程设计

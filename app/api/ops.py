@@ -1,21 +1,698 @@
-from fastapi import APIRouter
+"""Ops API: document management, knowledge-base metrics, and project group CRUD."""
+import logging
+import os
+import shutil
+from pathlib import Path
+from typing import List
+
+import asyncpg
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel
+
+from db import get_pool
+
+logger = logging.getLogger(__name__)
+
+_STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag"))
 
 router = APIRouter(prefix="/api/ops")
 
 
+async def _get_conn() -> asyncpg.pool.PoolConnectionProxy:
+    """Acquire a connection from the shared pool. Pair with _release_conn()."""
+    pool = await get_pool()
+    return await pool.acquire()
+
+
+async def _release_conn(conn) -> None:
+    pool = await get_pool()
+    await pool.release(conn)
+
+
+# ---------------------------------------------------------------------------
+# Documents
+# ---------------------------------------------------------------------------
+
 @router.get("/documents")
-async def list_documents():
-    # TODO: query PostgreSQL documents table
-    return {"documents": []}
+async def list_documents(status: str = "active", limit: int = 50):
+    conn = await _get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT d.doc_id, d.title, d.owner_email, d.business_line, d.status,"
+            "       d.admission_score, d.updated_at,"
+            "       COALESCE(d.acl, '{role:public}') AS acl,"
+            "       COUNT(c.chunk_id) AS chunk_count,"
+            "       ARRAY(SELECT group_id FROM document_groups WHERE doc_id = d.doc_id) AS group_ids"
+            " FROM documents d"
+            " LEFT JOIN chunks c ON c.doc_id = d.doc_id"
+            "   AND (c.effective_to IS NULL OR c.effective_to > now())"
+            " WHERE d.status=$1"
+            " GROUP BY d.doc_id"
+            " ORDER BY d.updated_at DESC"
+            " LIMIT $2",
+            status,
+            limit,
+        )
+        return {"documents": [dict(r) for r in rows]}
+    except Exception:
+        logger.exception("list_documents failed")
+        raise HTTPException(status_code=500, detail="Failed to list documents")
+    finally:
+        await _release_conn(conn)
+
+
+@router.delete("/documents/{doc_id}", status_code=204)
+async def delete_document(doc_id: str):
+    conn = await _get_conn()
+    try:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM chunks WHERE doc_id=$1", doc_id)
+            await conn.execute("DELETE FROM document_groups WHERE doc_id=$1", doc_id)
+            await conn.execute("DELETE FROM documents WHERE doc_id=$1", doc_id)
+    finally:
+        await _release_conn(conn)
+
+
+@router.post("/documents/{doc_id}/rebuild")
+async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
+    """Re-parse and re-index a document.
+
+    If `file` is provided, the stored source is replaced before re-processing.
+    Otherwise the existing source file on disk is used.
+    """
+    conn = await _get_conn()
+    try:
+        doc = await conn.fetchrow(
+            "SELECT title, owner_email, business_line, source_path,"
+            " version, effective_from, effective_to,"
+            " COALESCE(acl, '{role:public}') AS acl"
+            " FROM documents WHERE doc_id=$1",
+            doc_id,
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        group_rows = await conn.fetch(
+            "SELECT group_id FROM document_groups WHERE doc_id=$1", doc_id
+        )
+        groups = [r["group_id"] for r in group_rows] or ["global"]
+        owner = doc["owner_email"] or ""
+        business_line = doc["business_line"] or "default"
+        stored_source_path: str | None = doc["source_path"]
+        doc_version: str = doc["version"] or "1.0"
+        doc_eff_from = doc["effective_from"]
+        doc_eff_to = doc["effective_to"]
+        doc_acl: list[str] = list(doc["acl"]) if doc["acl"] else ["role:public"]
+    finally:
+        await _release_conn(conn)
+
+    raw_dir = _STORAGE_ROOT / "raw" / doc_id
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    if file is not None:
+        # Replace stored source with the newly uploaded file
+        for old in raw_dir.iterdir():
+            if old.is_file():
+                old.unlink()
+        source_file = raw_dir / file.filename
+        with source_file.open("wb") as f:
+            shutil.copyfileobj(file.file, f)
+    else:
+        # Resolve existing source file
+        source_file = None
+        if stored_source_path:
+            candidate = Path(stored_source_path)
+            if candidate.exists():
+                source_file = candidate
+        if source_file is None:
+            existing = [f for f in raw_dir.iterdir() if f.is_file()]
+            if existing:
+                source_file = existing[0]
+        if source_file is None:
+            raise HTTPException(status_code=404, detail="Source file not found on disk")
+
+    # Hard-delete old chunks so stale chunk_ids from removed sections don't linger
+    conn = await _get_conn()
+    try:
+        await conn.execute("DELETE FROM chunks WHERE doc_id=$1", doc_id)
+    finally:
+        await _release_conn(conn)
+
+    from pipeline.parser import parse_document
+    from pipeline.chunker import chunk_document
+    from pipeline.embedder import embed_chunks
+    from pipeline.indexer import index_chunks
+
+    parsed = await parse_document(source_file)
+    chunks = await chunk_document(
+        parsed,
+        doc_id=doc_id,
+        owner=owner,
+        business_line=business_line,
+        groups=groups,
+        source_path=str(source_file),
+        version=doc_version,
+        effective_from=doc_eff_from,
+        effective_to=doc_eff_to,
+        acl=doc_acl,
+    )
+    embedded = await embed_chunks(chunks)
+    result = await index_chunks(embedded)
+
+    return {
+        "doc_id": doc_id,
+        "chunk_count": result["chunk_count"],
+        "admission_score": result["admission_score"],
+    }
 
 
 @router.post("/documents/{doc_id}/disable")
 async def disable_document(doc_id: str):
-    # TODO: set status=rejected in documents table, clear related cache
-    return {"doc_id": doc_id, "status": "disabled"}
+    conn = await _get_conn()
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE documents SET status='rejected', updated_at=now() WHERE doc_id=$1",
+                doc_id,
+            )
+            await conn.execute(
+                "UPDATE chunks SET effective_to=now() WHERE doc_id=$1",
+                doc_id,
+            )
+        return {"doc_id": doc_id, "status": "disabled"}
+    finally:
+        await _release_conn(conn)
 
+
+# ---------------------------------------------------------------------------
+# Document ACL
+# ---------------------------------------------------------------------------
+
+class AclUpdate(BaseModel):
+    acl: List[str]
+
+
+@router.put("/documents/{doc_id}/acl")
+async def set_doc_acl(doc_id: str, body: AclUpdate):
+    acl = body.acl or ["role:public"]
+    conn = await _get_conn()
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE documents SET acl=$2, updated_at=now() WHERE doc_id=$1",
+                doc_id, acl,
+            )
+            await conn.execute(
+                "UPDATE chunks SET acl=$2 WHERE doc_id=$1",
+                doc_id, acl,
+            )
+        return {"doc_id": doc_id, "acl": acl}
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Document ↔ group assignment
+# ---------------------------------------------------------------------------
+
+class GroupAssign(BaseModel):
+    group_ids: List[str]
+
+
+@router.get("/documents/{doc_id}/groups")
+async def get_doc_groups(doc_id: str):
+    conn = await _get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT pg.group_id, pg.name, pg.description"
+            " FROM document_groups dg"
+            " JOIN project_groups pg ON pg.group_id = dg.group_id"
+            " WHERE dg.doc_id = $1",
+            doc_id,
+        )
+        return {"groups": [dict(r) for r in rows]}
+    finally:
+        await _release_conn(conn)
+
+
+@router.put("/documents/{doc_id}/groups")
+async def set_doc_groups(doc_id: str, body: GroupAssign):
+    """Replace the project groups of a document and sync chunks.product_line."""
+    groups = body.group_ids or ["global"]
+    conn = await _get_conn()
+    try:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM document_groups WHERE doc_id=$1", doc_id)
+            await conn.executemany(
+                "INSERT INTO document_groups(doc_id, group_id) VALUES($1, $2)"
+                " ON CONFLICT DO NOTHING",
+                [(doc_id, gid) for gid in groups],
+            )
+            await conn.execute(
+                "UPDATE chunks SET product_line=$2 WHERE doc_id=$1",
+                doc_id, groups,
+            )
+        return {"doc_id": doc_id, "group_ids": groups}
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Project groups CRUD
+# ---------------------------------------------------------------------------
+
+class GroupCreate(BaseModel):
+    group_id: str
+    name: str
+    description: str = ""
+
+
+@router.get("/groups")
+async def list_groups():
+    conn = await _get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT group_id, name, description, created_at"
+            " FROM project_groups ORDER BY created_at"
+        )
+        return {"groups": [dict(r) for r in rows]}
+    except Exception:
+        logger.exception("list_groups failed")
+        raise HTTPException(status_code=500, detail="Failed to list groups")
+    finally:
+        await _release_conn(conn)
+
+
+@router.post("/groups", status_code=201)
+async def create_group(body: GroupCreate):
+    conn = await _get_conn()
+    try:
+        await conn.execute(
+            "INSERT INTO project_groups(group_id, name, description)"
+            " VALUES($1, $2, $3)",
+            body.group_id, body.name, body.description,
+        )
+        return {"group_id": body.group_id, "name": body.name}
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail=f"group_id '{body.group_id}' already exists")
+    finally:
+        await _release_conn(conn)
+
+
+@router.delete("/groups/{group_id}", status_code=204)
+async def delete_group(group_id: str):
+    if group_id == "global":
+        raise HTTPException(status_code=400, detail="Cannot delete the built-in 'global' group")
+    conn = await _get_conn()
+    try:
+        await conn.execute("DELETE FROM project_groups WHERE group_id=$1", group_id)
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Admission analysis
+# ---------------------------------------------------------------------------
+
+@router.get("/documents/{doc_id}/admission")
+async def document_admission(doc_id: str):
+    """Re-compute admission score breakdown from stored chunks."""
+    import statistics as _stats
+
+    conn = await _get_conn()
+    try:
+        doc = await conn.fetchrow(
+            "SELECT admission_score, status FROM documents WHERE doc_id=$1", doc_id
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Fetch text fields only — no embedding column to avoid type-codec issues
+        rows = await conn.fetch(
+            "SELECT content, breadcrumb FROM chunks WHERE doc_id=$1"
+            " AND (effective_to IS NULL OR effective_to > now())",
+            doc_id,
+        )
+        chunks = [dict(r) for r in rows]
+        chunk_count = len(chunks)
+
+        if not chunks:
+            return {
+                "doc_id": doc_id,
+                "admission_score": doc["admission_score"],
+                "status": doc["status"],
+                "chunk_count": 0,
+                "dimensions": [],
+                "issues": ["文档暂无有效知识块，请先重构文档"],
+            }
+
+        contents = [c["content"] for c in chunks]
+        token_counts = [len(t) // 3 for t in contents]
+        total_chars = sum(len(t) for t in contents)
+        avg_tokens = _stats.mean(token_counts)
+
+        # ── 1. Content quality (0-30) ─────────────────────────────────────
+        content_score = min(30, total_chars // 150)
+        content_detail = f"总 {total_chars} 字符 / {chunk_count} 个知识块，满分需 ≥ 4500 字符"
+
+        # ── 2. Structure (0-20) ───────────────────────────────────────────
+        depths = [c.get("breadcrumb", "").count(" > ") for c in chunks]
+        max_depth = max(depths) if depths else 0
+        depth_score = min(10, max_depth * 3)
+        if len(token_counts) > 1 and avg_tokens > 0:
+            cv = _stats.stdev(token_counts) / avg_tokens
+            uniformity = 10 if cv < 0.5 else 7 if cv < 1.0 else 4 if cv < 1.5 else 1
+            cv_label = f"CV={cv:.2f}"
+        else:
+            uniformity = 5
+            cv_label = "仅单块"
+        struct_score = depth_score + uniformity
+        struct_detail = (
+            f"最大标题深度 {max_depth} 层（{depth_score}/10），"
+            f"块大小均匀度 {uniformity}/10（{cv_label}）"
+        )
+
+        # ── 3. Retrievability (0-20) ──────────────────────────────────────
+        if 60 <= avg_tokens <= 600:
+            tok_score, tok_label = 10, "理想区间"
+        elif 30 <= avg_tokens < 60 or 600 < avg_tokens <= 900:
+            tok_score, tok_label = 6, "可接受"
+        else:
+            tok_score, tok_label = 2, "偏差较大"
+        short_ratio = sum(1 for t in token_counts if t < 20) / len(token_counts)
+        short_score = 10 if short_ratio < 0.1 else 7 if short_ratio < 0.3 else 4 if short_ratio < 0.5 else 1
+        ret_score = tok_score + short_score
+        ret_detail = (
+            f"平均 {int(avg_tokens)} tokens（{tok_label}），"
+            f"超短块（<20 tokens）占比 {short_ratio:.0%}"
+        )
+
+        # ── 4. Novelty (0-20) — computed entirely in SQL, no vectors to Python ──
+        novelty_score = 0
+        novelty_detail = "语料库暂无向量数据"
+        sims: list[float] = []
+        try:
+            avg_sim_val = await conn.fetchval(
+                """
+                SELECT AVG(max_sim) FROM (
+                    SELECT (
+                        SELECT MAX(1 - (embedding <=> c.embedding))
+                        FROM chunks
+                        WHERE doc_id != $1
+                          AND embedding IS NOT NULL
+                    ) AS max_sim
+                    FROM chunks c
+                    WHERE c.doc_id = $1
+                      AND c.embedding IS NOT NULL
+                      AND (c.effective_to IS NULL OR c.effective_to > now())
+                    LIMIT 5
+                ) t
+                """,
+                doc_id,
+            )
+            if avg_sim_val is not None:
+                avg_sim = float(avg_sim_val)
+                sims = [avg_sim]
+                novelty_score = int((1.0 - min(avg_sim, 1.0)) * 20)
+                novelty_detail = f"与语料库平均余弦相似度 {avg_sim:.2f}（越低越新颖）"
+            else:
+                novelty_score = 20
+                novelty_detail = "语料库中无其他文档，视为完全新颖"
+        except Exception as exc:
+            novelty_detail = f"向量计算失败：{exc}"
+
+        # ── Issues ───────────────────────────────────────────────────────
+        issues: list[str] = []
+        if content_score < 15:
+            issues.append(f"内容量偏少（当前 {total_chars} 字符），建议补充更多内容")
+        if depth_score < 6:
+            issues.append(f"标题层级不足（最深 {max_depth} 层），增加章节结构可提升结构分")
+        if uniformity <= 4:
+            issues.append("知识块大小差异悬殊（CV 偏高），建议检查文档分段格式")
+        if avg_tokens < 30:
+            issues.append(f"平均知识块过短（{int(avg_tokens)} tokens），可能导致检索召回不足")
+        elif avg_tokens > 900:
+            issues.append(f"平均知识块过长（{int(avg_tokens)} tokens），建议增加段落分隔")
+        if short_ratio >= 0.3:
+            issues.append(f"超短知识块占比 {short_ratio:.0%}，建议合并或补充内容")
+        if sims and novelty_score < 10:
+            issues.append("内容与已有知识库相似度较高，建议确认是否重复导入")
+
+        return {
+            "doc_id": doc_id,
+            "admission_score": doc["admission_score"],
+            "status": doc["status"],
+            "chunk_count": chunk_count,
+            "dimensions": [
+                {"key": "content_quality", "label": "内容质量",  "score": content_score, "max": 30, "detail": content_detail},
+                {"key": "structure",       "label": "结构完整性", "score": struct_score,   "max": 20, "detail": struct_detail},
+                {"key": "retrievability",  "label": "可检索性",   "score": ret_score,      "max": 20, "detail": ret_detail},
+                {"key": "novelty",         "label": "内容新颖度", "score": novelty_score,  "max": 20, "detail": novelty_detail},
+                {"key": "base",            "label": "基础分",     "score": 10,             "max": 10, "detail": "固定基础分"},
+            ],
+            "issues": issues,
+        }
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
 
 @router.get("/metrics")
 async def metrics():
-    # TODO: return knowledge base health metrics
-    return {"chunk_count": 0, "doc_count": 0, "cache_hit_rate": 0.0}
+    conn = await _get_conn()
+    try:
+        chunk_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM chunks"
+            " WHERE (effective_to IS NULL OR effective_to > now())"
+        )
+        doc_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM documents WHERE status='active'"
+        )
+        return {
+            "chunk_count": chunk_count or 0,
+            "doc_count": doc_count or 0,
+            "cache_hit_rate": 0.0,
+        }
+    except Exception:
+        logger.exception("metrics failed")
+        raise HTTPException(status_code=500, detail="Failed to load metrics")
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Chunks CRUD
+# ---------------------------------------------------------------------------
+
+class ChunkUpsert(BaseModel):
+    title: str = ""
+    breadcrumb: str = ""
+    content: str
+    version: str | None = None
+
+
+@router.get("/documents/{doc_id}/chunks")
+async def list_chunks(doc_id: str):
+    conn = await _get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT chunk_id, title, breadcrumb, content,"
+            " version, effective_from, effective_to, updated_at"
+            " FROM chunks WHERE doc_id=$1"
+            "  AND (effective_to IS NULL OR effective_to > now())"
+            " ORDER BY chunk_id",
+            doc_id,
+        )
+        return {"chunks": [dict(r) for r in rows]}
+    except Exception:
+        logger.exception("list_chunks failed")
+        raise HTTPException(status_code=500, detail="Failed to list chunks")
+    finally:
+        await _release_conn(conn)
+
+
+@router.put("/chunks/{chunk_id}")
+async def update_chunk(chunk_id: str, body: ChunkUpsert):
+    from inference.embedding import embed
+    from pgvector.asyncpg import register_vector
+
+    embedding = None
+    try:
+        vecs = embed([body.content])
+        embedding = vecs[0].dense
+    except Exception:
+        pass
+
+    conn = await _get_conn()
+    try:
+        if embedding is not None:
+            await register_vector(conn)
+            await conn.execute(
+                "UPDATE chunks SET title=$2, breadcrumb=$3, content=$4,"
+                " version=COALESCE($5, version),"
+                " embedding=$6, updated_at=now() WHERE chunk_id=$1",
+                chunk_id, body.title, body.breadcrumb, body.content,
+                body.version, embedding,
+            )
+        else:
+            await conn.execute(
+                "UPDATE chunks SET title=$2, breadcrumb=$3, content=$4,"
+                " version=COALESCE($5, version),"
+                " updated_at=now() WHERE chunk_id=$1",
+                chunk_id, body.title, body.breadcrumb, body.content, body.version,
+            )
+        row = await conn.fetchrow(
+            "SELECT chunk_id, title, breadcrumb, content, updated_at"
+            " FROM chunks WHERE chunk_id=$1",
+            chunk_id,
+        )
+        return dict(row) if row else {}
+    finally:
+        await _release_conn(conn)
+
+
+@router.delete("/chunks/{chunk_id}", status_code=204)
+async def delete_chunk(chunk_id: str):
+    conn = await _get_conn()
+    try:
+        await conn.execute(
+            "UPDATE chunks SET effective_to=now() WHERE chunk_id=$1", chunk_id
+        )
+    finally:
+        await _release_conn(conn)
+
+
+@router.post("/documents/{doc_id}/chunks", status_code=201)
+async def create_chunk(doc_id: str, body: ChunkUpsert):
+    import time as _time
+    from inference.embedding import embed
+    from pgvector.asyncpg import register_vector
+
+    chunk_id = f"{doc_id}#manual_{int(_time.time() * 1000)}"
+
+    embedding = None
+    try:
+        vecs = embed([body.content])
+        embedding = vecs[0].dense
+    except Exception:
+        pass
+
+    conn = await _get_conn()
+    try:
+        group_rows = await conn.fetch(
+            "SELECT group_id FROM document_groups WHERE doc_id=$1", doc_id
+        )
+        product_line = [r["group_id"] for r in group_rows] or ["global"]
+
+        if embedding is not None:
+            await register_vector(conn)
+            await conn.execute(
+                "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
+                " product_line, embedding, updated_at)"
+                " VALUES($1, $2, $3, $4, $5, $6, $7, now())",
+                chunk_id, doc_id, body.title, body.breadcrumb, body.content,
+                product_line, embedding,
+            )
+        else:
+            await conn.execute(
+                "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
+                " product_line, updated_at)"
+                " VALUES($1, $2, $3, $4, $5, $6, now())",
+                chunk_id, doc_id, body.title, body.breadcrumb, body.content,
+                product_line,
+            )
+        return {"chunk_id": chunk_id, "doc_id": doc_id}
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Prompt version management (source of truth: prompt_versions table)
+# ---------------------------------------------------------------------------
+
+class PromptCreate(BaseModel):
+    version: str
+    note: str = ""
+    content: str
+
+
+@router.get("/prompts")
+async def list_prompts():
+    conn = await _get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT version, note, created_at, is_active"
+            " FROM prompt_versions ORDER BY created_at DESC"
+        )
+        return {"prompts": [dict(r) for r in rows]}
+    except Exception:
+        logger.exception("list_prompts failed")
+        raise HTTPException(status_code=500, detail="Failed to list prompts")
+    finally:
+        await _release_conn(conn)
+
+
+@router.get("/prompts/{version}")
+async def get_prompt(version: str):
+    conn = await _get_conn()
+    try:
+        row = await conn.fetchrow(
+            "SELECT version, content, note, created_at, is_active"
+            " FROM prompt_versions WHERE version=$1",
+            version,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Version '{version}' not found")
+        return dict(row)
+    finally:
+        await _release_conn(conn)
+
+
+@router.post("/prompts", status_code=201)
+async def create_prompt(body: PromptCreate):
+    if not body.version.strip():
+        raise HTTPException(status_code=422, detail="version is required")
+    if not body.content.strip():
+        raise HTTPException(status_code=422, detail="content is required")
+    conn = await _get_conn()
+    try:
+        try:
+            await conn.execute(
+                "INSERT INTO prompt_versions(version, content, note)"
+                " VALUES($1, $2, $3)",
+                body.version.strip(), body.content.strip(), body.note,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail=f"Version '{body.version}' already exists")
+        return {"version": body.version.strip()}
+    finally:
+        await _release_conn(conn)
+
+
+@router.post("/prompts/{version}/activate")
+async def activate_prompt(version: str):
+    conn = await _get_conn()
+    try:
+        row = await conn.fetchrow(
+            "SELECT content FROM prompt_versions WHERE version=$1", version
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Version '{version}' not found")
+        async with conn.transaction():
+            await conn.execute("UPDATE prompt_versions SET is_active=FALSE")
+            await conn.execute(
+                "UPDATE prompt_versions SET is_active=TRUE WHERE version=$1", version
+            )
+    finally:
+        await _release_conn(conn)
+    # Refresh Redis cache for instant hot-swap in generate_node (best-effort)
+    try:
+        import redis.asyncio as aioredis
+        rc = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        await rc.set("verity:prompt:active", row["content"])
+        await rc.aclose()
+    except Exception:
+        pass
+    return {"activated": version}

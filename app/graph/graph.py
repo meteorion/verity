@@ -1,3 +1,4 @@
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 
 from graph.state import OrchestratorState
@@ -11,22 +12,40 @@ from graph.nodes.transfer import transfer_node
 
 
 def _route_after_safety(state: OrchestratorState) -> str:
-    return "generate" if state.get("blocked") else "faq"
+    if state.get("intent") == "reject":
+        return END
+    return "faq"
+
+
+def _route_after_faq(state: OrchestratorState) -> str:
+    if state.get("faq_hit"):
+        return END
+    return "intent"
 
 
 def _route_after_intent(state: OrchestratorState) -> str:
-    if state.get("faq_hit"):
-        return "generate"
     match state.get("intent", "rag"):
         case "transfer":
             return "transfer"
         case "tool":
             return "tool"
         case _:
+            # "rag", "chitchat", and any unknown intent all go through rag node
+            # (rag node returns no chunks for chitchat; LLM handles it naturally)
             return "rag"
 
 
-def build_graph() -> StateGraph:
+_graph = None
+
+
+def get_graph():
+    global _graph
+    if _graph is None:
+        _graph = build_graph()
+    return _graph
+
+
+def build_graph():
     g = StateGraph(OrchestratorState)
 
     g.add_node("safety", safety_node)
@@ -38,13 +57,13 @@ def build_graph() -> StateGraph:
     g.add_node("transfer", transfer_node)
 
     g.set_entry_point("safety")
-    g.add_conditional_edges("safety", _route_after_safety)
-    g.add_edge("faq", "intent")
+    g.add_conditional_edges("safety", _route_after_safety, {"faq": "faq", END: END})
+    g.add_conditional_edges("faq", _route_after_faq, {"intent": "intent", END: END})
     g.add_conditional_edges("intent", _route_after_intent)
     g.add_edge("rag", "generate")
     g.add_edge("tool", "generate")
     g.add_edge("generate", END)
     g.add_edge("transfer", END)
 
-    # TODO: attach RedisSaver for persistent session state
-    return g.compile()
+    checkpointer = MemorySaver()
+    return g.compile(checkpointer=checkpointer)

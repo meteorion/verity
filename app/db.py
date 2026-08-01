@@ -52,3 +52,34 @@ async def get_connection() -> asyncpg.Connection:
     conn = await asyncpg.connect(_DSN)
     await register_vector(conn)
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Shared connection pool
+#
+# One process-wide asyncpg pool, created lazily on first use (bound to the
+# running event loop) and closed on app shutdown. All request handlers should
+# acquire from this pool instead of opening a fresh connection per call —
+# a new connect() per request pays a full TCP+auth handshake and can exhaust
+# Postgres max_connections under load. Callers that need pgvector codecs call
+# register_vector() on the acquired connection themselves (it persists for the
+# pooled connection's lifetime).
+# ---------------------------------------------------------------------------
+
+_pool: asyncpg.Pool | None = None
+
+
+async def get_pool() -> asyncpg.Pool:
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(_DSN, min_size=2, max_size=10)
+        async with _pool.acquire() as conn:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    return _pool
+
+
+async def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
