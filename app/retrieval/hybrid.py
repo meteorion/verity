@@ -120,8 +120,7 @@ async def _sparse_search(
     limit: int,
     project_group: str | None = None,
 ) -> list[asyncpg.Record]:
-    tokens = sorted(sparse.items(), key=lambda x: -x[1])[:256]
-    sparse_str = "{" + ",".join(f"{k}:{v:.6f}" for k, v in tokens) + "}/" + str(30522)
+    sparse_str = emb_mod.sparse_to_pgvector(sparse)
     pg_clause = ""
     if roles:
         acl_clause = "($2::text[] && acl OR 'role:public' = ANY(acl))"

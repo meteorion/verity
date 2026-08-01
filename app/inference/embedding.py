@@ -36,6 +36,34 @@ class EmbedResult:
     sparse: dict[str, float] | None
 
 
+# BGE-M3 sparse vocabulary size. The pgvector `sparsevec` column is declared with
+# this dimension, so the write path (indexer) and read path (hybrid) must format
+# against the same dim/cap — keep this the single source of truth for both.
+SPARSE_DIM = 30522
+SPARSE_MAX_ENTRIES = 256
+
+
+def sparse_to_pgvector(
+    sparse: dict | None,
+    max_entries: int = SPARSE_MAX_ENTRIES,
+    dim: int = SPARSE_DIM,
+) -> str | None:
+    """Format a {token_id: weight} map as a pgvector `sparsevec` literal
+    ('{i:w,...}/dim'), keeping the top-`max_entries` non-zero weights by value.
+    Returns None when there is nothing to store."""
+    if not sparse:
+        return None
+    top = sorted(
+        ((k, v) for k, v in sparse.items() if v != 0),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )[:max_entries]
+    if not top:
+        return None
+    entries = ",".join(f"{int(k)}:{float(v):.6f}" for k, v in top)
+    return "{" + entries + "}/" + str(dim)
+
+
 def load_embedding_model() -> None:
     global _local_model
     if _PROVIDER != "local":

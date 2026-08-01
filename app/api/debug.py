@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from api.sessions import record_turn
+from citations import build_refs
 
 router = APIRouter()
 
@@ -99,24 +100,7 @@ async def debug_chat(req: DebugRequest, request: Request):
     ]
 
     raw_chunks = accumulated.get("retrieved_chunks") or []
-    key_to_idx: dict[str, int] = {}
-    seen_idx: set[int] = set()
-    refs = []
-    for c in raw_chunks:
-        url = (c.get("source_url") or "").strip()
-        key = url if url else (
-            c.get("breadcrumb", "").split(" > ")[0].strip()
-            or c.get("title", "").strip()
-            or c.get("doc_id", "")
-        )
-        if key not in key_to_idx:
-            key_to_idx[key] = len(key_to_idx) + 1
-        src_idx = key_to_idx[key]
-        if src_idx in seen_idx:
-            continue
-        seen_idx.add(src_idx)
-        refs.append({"idx": src_idx, **{k: c.get(k, "") for k in ("chunk_id", "title", "breadcrumb", "source_url")}})
-    refs.sort(key=lambda r: r["idx"])
+    refs = build_refs(raw_chunks)
 
     answer = accumulated.get("answer_stream") or ""
 

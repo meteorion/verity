@@ -6,11 +6,9 @@ from typing import Any
 from pgvector.asyncpg import register_vector
 
 from db import get_pool
+from inference.embedding import sparse_to_pgvector
 
 logger = logging.getLogger(__name__)
-
-_SPARSE_DIM = 30522
-_SPARSE_MAX_ENTRIES = 256
 
 
 def _calc_score(chunks: list[dict], dedup_similarities: list[float] | None = None) -> int:
@@ -73,20 +71,6 @@ def _calc_score(chunks: list[dict], dedup_similarities: list[float] | None = Non
     return min(100, total)
 
 
-def _sparse_to_pgvector(sparse: dict | None) -> str | None:
-    if not sparse:
-        return None
-    top = sorted(
-        ((k, v) for k, v in sparse.items() if v != 0),
-        key=lambda x: x[1],
-        reverse=True,
-    )[:_SPARSE_MAX_ENTRIES]
-    if not top:
-        return None
-    entries = ",".join(f"{int(k)}:{float(v)}" for k, v in top)
-    return f"{{{entries}}}/{_SPARSE_DIM}"
-
-
 async def index_chunks(chunks: list[dict[str, Any]]) -> dict:
     """Insert chunks and compute admission score. Returns {chunk_count, admission_score}."""
     if not chunks:
@@ -126,7 +110,7 @@ async def index_chunks(chunks: list[dict[str, Any]]) -> dict:
         async with conn.transaction():
             for chunk in chunks:
                 embedding = chunk.get("embedding")
-                sparse = _sparse_to_pgvector(chunk.get("sparse_vector"))
+                sparse = sparse_to_pgvector(chunk.get("sparse_vector"))
                 emb_value = embedding if embedding else None
 
                 await conn.execute(

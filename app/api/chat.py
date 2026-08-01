@@ -7,19 +7,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from api import auth
 from api.sessions import record_turn
-from api.auth import _SECRET, _ALGO
-
-try:
-    from jose import jwt as _jwt, JWTError as _JWTError
-    _JWT_AVAILABLE = True
-except ImportError:
-    _JWT_AVAILABLE = False
+from citations import build_refs
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-_SAFE_CHUNK_KEYS = {"chunk_id", "title", "breadcrumb", "source_url"}
 
 # Identity/roles drive ACL filtering, so by default they come ONLY from a
 # verified JWT. X-UID/X-Roles headers are trusted only when the service runs
@@ -37,17 +30,11 @@ class ChatRequest(BaseModel):
 
 
 def _extract_token_claims(request: Request) -> tuple[str | None, list[str]]:
-    """Extract uid and roles from Bearer token if present."""
-    if not _JWT_AVAILABLE:
+    """Extract uid and roles from a Bearer token if present (best-effort)."""
+    authz = request.headers.get("Authorization", "")
+    if not authz.startswith("Bearer "):
         return None, []
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        return None, []
-    try:
-        payload = _jwt.decode(auth[7:], _SECRET, algorithms=[_ALGO])
-        return payload.get("sub"), payload.get("roles") or []
-    except _JWTError:
-        return None, []
+    return auth.decode_claims(authz[7:])
 
 
 @router.post("/v1/chat")
@@ -125,27 +112,7 @@ async def chat(req: ChatRequest, request: Request):
 
         yield "data: [DONE]\n\n"
         if last_chunks:
-            key_to_idx: dict[str, int] = {}
-            seen_idx: set[int] = set()
-            refs = []
-            for c in last_chunks:
-                url = (c.get("source_url") or "").strip()
-                key = url if url else (
-                    c.get("breadcrumb", "").split(" > ")[0].strip()
-                    or c.get("title", "").strip()
-                    or c.get("doc_id", "")
-                )
-                if key not in key_to_idx:
-                    key_to_idx[key] = len(key_to_idx) + 1
-                src_idx = key_to_idx[key]
-                if src_idx in seen_idx:
-                    continue
-                seen_idx.add(src_idx)
-                refs.append({
-                    "idx": src_idx,
-                    **{k: v for k, v in c.items() if k in _SAFE_CHUNK_KEYS},
-                })
-            refs.sort(key=lambda r: r["idx"])
+            refs = build_refs(last_chunks)
             yield f"data: [REFS]{json.dumps(refs, ensure_ascii=False)}\n\n"
 
         try:

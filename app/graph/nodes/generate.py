@@ -13,6 +13,7 @@ import os
 import time
 from pathlib import Path
 
+from citations import assign_source_indices
 from graph.state import OrchestratorState
 from inference.nli import nli_check
 
@@ -90,31 +91,13 @@ async def _get_active_prompt() -> str:
     return _FALLBACK_PROMPT
 
 
-def _assign_source_indices(chunks: list[dict]) -> list[dict]:
-    """Assign _src_idx: same source_url -> same index; no URL -> group by title."""
-    key_to_idx: dict[str, int] = {}
-    result = []
-    for c in chunks:
-        url = (c.get("source_url") or "").strip()
-        if url:
-            key = url
-        else:
-            key = (
-                c.get("breadcrumb", "").split(" > ")[0].strip()
-                or c.get("title", "").strip()
-                or c.get("doc_id", "")
-            )
-        if key not in key_to_idx:
-            key_to_idx[key] = len(key_to_idx) + 1
-        result.append({**c, "_src_idx": key_to_idx[key]})
-    return result
 
 
 async def generate_node(state: OrchestratorState) -> dict:
     # Always compose the fixed safety guard in front of the (editable) business
     # prompt, so an admin-activated prompt lacking guards can't disable them.
     system_prompt = f"{_SAFETY_GUARD}\n\n{await _get_active_prompt()}"
-    chunks = _assign_source_indices(state.get("retrieved_chunks", []))
+    chunks = assign_source_indices(state.get("retrieved_chunks", []))
     tool_results = state.get("tool_results", [])
     history = state.get("history_recent", [])
     summary = state.get("history_summary") or ""

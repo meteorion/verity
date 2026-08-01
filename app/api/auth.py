@@ -92,6 +92,19 @@ def _safe(user: dict) -> dict:
     return {k: v for k, v in user.items() if k != "password_hash"}
 
 
+def decode_claims(token: str) -> tuple[str | None, list[str]]:
+    """Best-effort decode of a JWT into (uid, roles); (None, []) if invalid.
+
+    Soft identity extraction only — does NOT check the user store or raise.
+    Use verify_token / require_admin for enforced auth.
+    """
+    try:
+        payload = jwt.decode(token, _SECRET, algorithms=[_ALGO])
+    except JWTError:
+        return None, []
+    return payload.get("sub"), payload.get("roles") or []
+
+
 # ---------------------------------------------------------------------------
 # FastAPI dependencies
 # ---------------------------------------------------------------------------
