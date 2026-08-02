@@ -70,7 +70,6 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
     ON chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 200);
 CREATE INDEX IF NOT EXISTS chunks_doc_version_idx ON chunks (doc_id, version);
-CREATE INDEX IF NOT EXISTS chunks_is_parent_idx ON chunks (is_parent) WHERE is_parent = FALSE;
 
 -- Question augmentation index: LLM-generated alternative phrasings per chunk.
 -- Generated on demand from the admin UI (not auto-generated at ingest time).
@@ -237,6 +236,7 @@ ALTER TABLE chunks ADD COLUMN IF NOT EXISTS category TEXT;
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{{}}';
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chunk_index INT DEFAULT 0;
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS is_parent BOOL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS chunks_is_parent_idx ON chunks (is_parent) WHERE is_parent = FALSE;
 DO $$
 BEGIN
     ALTER TABLE chunks ADD COLUMN sparse_vector sparsevec(30522);
