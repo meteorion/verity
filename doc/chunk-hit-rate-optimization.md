@@ -150,7 +150,37 @@ score(chunk) = α / (k + dense_rank) + (1-α) / (k + sparse_rank)
 
 ---
 
-### 3.4 向量索引参数优化
+### 3.4 Dense 检索分数阈值过滤
+
+**问题**：Dense 检索固定返回 Top-N 条结果，即使排名靠后的 chunk 与查询相关性极低，仍会进入后续流程，引入噪声。
+
+**方案**：在 `_dense_search()` 的 SQL 中加可选的余弦相似度下界过滤：
+
+```sql
+SELECT chunk_id, 1 - (embedding <=> $1) AS score, ...
+FROM chunks
+WHERE ...
+  AND 1 - (embedding <=> $1) >= $min_score   -- 新增，默认 0.0（不过滤）
+ORDER BY embedding <=> $1
+LIMIT $top_vector
+```
+
+- `min_score_threshold` 默认 **0.0**（关闭），通过 `settings.json` 配置
+- 建议起始值 **0.3**（余弦相似度低于此值说明语义几乎不相关）
+- 仅作 sanity filter，不替代 reranker：粗剪明显不相关，精排交给后续
+
+**为何不对 RRF 分数加阈值**：RRF 分数由秩推导（`1/(k+rank)`），不同查询间不可比，无法设置有意义的全局阈值，跳过。
+
+**参数归属**：
+```json
+// config/app_settings.json
+{ "dense_score_threshold": 0.3 }
+```
+同步加入 `SettingsWrite` / `SettingsRead`，与 `rerank_threshold` 并列。
+
+---
+
+### 3.5 向量索引参数优化
 
 **现状**：HNSW 参数 `m=16, ef_construction=200`，检索时 `ef_search` 未显式设置（使用 pgvector 默认值 40）。
 
@@ -219,7 +249,8 @@ Prompt：
 
 | 优先级 | 方案 | 实现难度 | 预期收益 |
 |---|---|---|---|
-| P1 | 3.4 ef_search 调优 | 低 | 中 |
+| P1 | 3.4 dense_score_threshold 过滤 | 低 | 低（噪声兜底） |
+| P1 | 3.5 ef_search 调优 | 低 | 中 |
 | P1 | 2.1 父子分块 | 中 | 高 |
 | P1 | 3.2 加权 RRF | 低 | 中 |
 | P2 | 2.3 上下文感知切块 | 中 | 高 |
