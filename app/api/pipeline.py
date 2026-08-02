@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, Form
 
 from db import get_pool
+from pipeline.models import Document
 from pipeline.parser import parse_document
 from pipeline.chunker import chunk_document
 from pipeline.embedder import embed_chunks
@@ -56,9 +57,13 @@ async def ingest(
 
     parsed = await parse_document(raw_path)
 
-    chunks = await chunk_document(
-        parsed, doc_id=doc_id, owner=owner, business_line=business_line,
-        groups=groups, source_path=str(raw_path),
+    doc = Document(
+        doc_id=doc_id,
+        title=parsed.get("metadata", {}).get("title", doc_id),
+        owner_email=owner,
+        business_line=business_line,
+        group_ids=groups,
+        source_path=str(raw_path),
         source_url=source_url or None,
         version=ver,
         effective_from=eff_from,
@@ -70,6 +75,7 @@ async def ingest(
         chunk_size=chunk_size if chunk_size > 0 else None,
         chunk_overlap=chunk_overlap if chunk_overlap > 0 else None,
     )
+    chunks = await chunk_document(parsed, doc)
     embedded = await embed_chunks(chunks)
     result = await index_chunks(embedded)
 

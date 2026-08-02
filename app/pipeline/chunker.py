@@ -103,34 +103,20 @@ def _split_by_paragraphs(
 
 async def chunk_document(
     parsed: dict[str, Any],
-    doc_id: str,
-    owner: str,
-    business_line: str,
-    groups: list[str] | None = None,
-    source_path: str | None = None,
-    source_url: str | None = None,
-    version: str | None = None,
-    effective_from=None,
-    effective_to=None,
-    acl: list[str] | None = None,
-    doc_type: str | None = None,
-    category: str | None = None,
-    tags: list[str] | None = None,
-    chunk_size: int | None = None,
-    chunk_overlap: int | None = None,
+    doc: Document,
 ) -> list[Chunk]:
     markdown: str = parsed.get("markdown", "")
-    doc_title: str = parsed.get("metadata", {}).get("title", doc_id)
+    doc_title: str = parsed.get("metadata", {}).get("title", doc.doc_id)
     updated_at = datetime.now(timezone.utc)
-    product_line = list(groups) if groups else ["global"]
-    chunk_acl = list(acl) if acl else ["role:public"]
-    chunk_tags = list(tags) if tags else []
+    product_line = list(doc.group_ids) if doc.group_ids else ["global"]
+    chunk_acl = list(doc.acl) if doc.acl else ["role:public"]
+    chunk_tags = list(doc.tags) if doc.tags else []
 
     sections = _parse_sections(markdown)
     # doc_chunk_* = explicit per-doc override (stored in DB, None means "use global").
     # effective_* = what actually drives the split logic.
-    doc_chunk_size = chunk_size
-    doc_chunk_overlap = chunk_overlap
+    doc_chunk_size = doc.chunk_size
+    doc_chunk_overlap = doc.chunk_overlap
     settings_size, settings_overlap = _get_chunk_params()
     effective_chunk_size = doc_chunk_size if doc_chunk_size is not None else settings_size
     effective_chunk_overlap = doc_chunk_overlap if doc_chunk_overlap is not None else settings_overlap
@@ -154,18 +140,18 @@ async def chunk_document(
             continue
 
         common: dict[str, Any] = dict(
-            doc_id=doc_id,
+            doc_id=doc.doc_id,
             title=section_title,
             breadcrumb=breadcrumb,
-            source_url=source_url,
+            source_url=doc.source_url,
             product_line=product_line,
             region=["global"],
-            version=version,
-            effective_from=effective_from,
-            effective_to=effective_to,
+            version=doc.version,
+            effective_from=doc.effective_from,
+            effective_to=doc.effective_to,
             acl=chunk_acl,
-            doc_type=doc_type,
-            category=category,
+            doc_type=doc.doc_type,
+            category=doc.category,
             tags=chunk_tags,
             updated_at=updated_at,
         )
@@ -207,7 +193,7 @@ async def chunk_document(
 
     logger.info(
         "Chunked doc_id=%s sections=%d total_chunks=%d (parents=%d)",
-        doc_id, len(sections), len(all_chunks),
+        doc.doc_id, len(sections), len(all_chunks),
         sum(1 for c in all_chunks if c.is_parent),
     )
 
@@ -238,10 +224,10 @@ async def chunk_document(
                 chunk_size     = COALESCE(EXCLUDED.chunk_size, documents.chunk_size),
                 chunk_overlap  = COALESCE(EXCLUDED.chunk_overlap, documents.chunk_overlap)
             """,
-            doc_id, doc_title, owner, business_line,
-            "upload", source_path, source_url,
-            version, effective_from, effective_to,
-            chunk_acl, product_line, doc_type, doc_chunk_size, doc_chunk_overlap,
+            doc.doc_id, doc_title, doc.owner_email, doc.business_line,
+            doc.source_type, doc.source_path, doc.source_url,
+            doc.version, doc.effective_from, doc.effective_to,
+            chunk_acl, product_line, doc.doc_type, doc_chunk_size, doc_chunk_overlap,
         )
 
     return all_chunks

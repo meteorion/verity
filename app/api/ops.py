@@ -150,18 +150,19 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
     finally:
         await _release_conn(conn)
 
+    from pipeline.models import Document as PipelineDocument
     from pipeline.parser import parse_document
     from pipeline.chunker import chunk_document
     from pipeline.embedder import embed_chunks
     from pipeline.indexer import index_chunks
 
     parsed = await parse_document(source_file)
-    chunks = await chunk_document(
-        parsed,
+    pipeline_doc = PipelineDocument(
         doc_id=doc_id,
-        owner=owner,
+        title=doc["title"] or doc_id,
+        owner_email=owner,
         business_line=business_line,
-        groups=groups,
+        group_ids=groups,
         source_path=str(source_file),
         version=doc_version,
         effective_from=doc_eff_from,
@@ -171,6 +172,7 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
         chunk_size=doc_chunk_size,
         chunk_overlap=doc_chunk_overlap,
     )
+    chunks = await chunk_document(parsed, pipeline_doc)
     embedded = await embed_chunks(chunks)
     result = await index_chunks(embedded)
 
