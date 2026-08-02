@@ -72,6 +72,20 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
 CREATE INDEX IF NOT EXISTS chunks_doc_version_idx ON chunks (doc_id, version);
 CREATE INDEX IF NOT EXISTS chunks_is_parent_idx ON chunks (is_parent) WHERE is_parent = FALSE;
 
+-- Question augmentation index: LLM-generated alternative phrasings per chunk.
+-- Generated on demand from the admin UI (not auto-generated at ingest time).
+CREATE TABLE IF NOT EXISTS question_embeddings (
+    id         BIGSERIAL PRIMARY KEY,
+    chunk_id   TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    question   TEXT NOT NULL,
+    embedding  vector({_EMBEDDING_DIM}),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS question_embeddings_hnsw
+    ON question_embeddings USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 200);
+CREATE INDEX IF NOT EXISTS question_embeddings_chunk_idx ON question_embeddings (chunk_id);
+
 -- Evaluation tables
 CREATE TABLE IF NOT EXISTS eval_datasets (
     dataset_id   TEXT PRIMARY KEY,

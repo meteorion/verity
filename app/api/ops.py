@@ -744,6 +744,124 @@ async def delete_chunk(chunk_id: str):
         await _release_conn(conn)
 
 
+@router.get("/chunks/{chunk_id}/questions")
+async def list_questions(chunk_id: str):
+    """Return all generated questions for a chunk (without embedding vectors)."""
+    conn = await _get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT id, question, created_at FROM question_embeddings"
+            " WHERE chunk_id=$1 ORDER BY id",
+            chunk_id,
+        )
+    finally:
+        await _release_conn(conn)
+    return {"chunk_id": chunk_id, "questions": [
+        {"id": r["id"], "question": r["question"], "created_at": r["created_at"]}
+        for r in rows
+    ]}
+
+
+class QuestionUpdate(BaseModel):
+    question: str
+
+
+@router.post("/chunks/{chunk_id}/questions/generate", status_code=201)
+async def generate_questions(chunk_id: str, k: int = 4):
+    """Use LLM to generate k alternative questions for the chunk, embed and store them.
+    Replaces any previously generated questions for this chunk.
+    """
+    import asyncio
+    from inference.embedding import embed
+    from inference.llm import get_llm
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from pgvector.asyncpg import register_vector
+
+    conn = await _get_conn()
+    try:
+        row = await conn.fetchrow(
+            "SELECT content, title FROM chunks WHERE chunk_id=$1", chunk_id
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        content = row["content"] or ""
+        title = row["title"] or ""
+    finally:
+        await _release_conn(conn)
+
+    # Ask LLM for k questions
+    system = (
+        f"根据以下知识块内容，生成{k}个用户可能提出的不同问法。"
+        "每行一个，不要编号、不要解释、不要重复原文。"
+    )
+    user = f"标题：{title}\n内容：{content[:1200]}"
+    llm = get_llm(max_tokens=300, temperature=0.5)
+    resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
+    raw = resp.content
+    if isinstance(raw, list):
+        raw = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in raw)
+    questions = [ln.strip() for ln in raw.strip().splitlines() if ln.strip()][:k]
+
+    if not questions:
+        raise HTTPException(status_code=502, detail="LLM returned no questions")
+
+    # Batch-embed questions
+    embed_results = await asyncio.to_thread(embed, questions, "dense")
+    vecs = [r.dense for r in embed_results]
+
+    # Replace old questions and insert new ones
+    pool = await get_pool()
+    async with pool.acquire() as conn2:
+        await register_vector(conn2)
+        async with conn2.transaction():
+            await conn2.execute("DELETE FROM question_embeddings WHERE chunk_id=$1", chunk_id)
+            await conn2.executemany(
+                "INSERT INTO question_embeddings(chunk_id, question, embedding)"
+                " VALUES($1, $2, $3)",
+                [(chunk_id, q, v) for q, v in zip(questions, vecs)],
+            )
+    logger.info("Generated %d questions for chunk_id=%s", len(questions), chunk_id)
+    return {"chunk_id": chunk_id, "generated": len(questions), "questions": questions}
+
+
+@router.put("/chunks/{chunk_id}/questions/{q_id}")
+async def update_question(chunk_id: str, q_id: int, body: QuestionUpdate):
+    """Edit question text and re-embed."""
+    import asyncio
+    from inference.embedding import embed
+    from pgvector.asyncpg import register_vector
+
+    if not body.question.strip():
+        raise HTTPException(status_code=422, detail="question cannot be empty")
+
+    embed_results = await asyncio.to_thread(embed, [body.question], "dense")
+    vec = embed_results[0].dense
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await register_vector(conn)
+        result = await conn.execute(
+            "UPDATE question_embeddings SET question=$1, embedding=$2"
+            " WHERE id=$3 AND chunk_id=$4",
+            body.question, vec, q_id, chunk_id,
+        )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Question not found")
+    return {"id": q_id, "question": body.question}
+
+
+@router.delete("/chunks/{chunk_id}/questions/{q_id}", status_code=204)
+async def delete_question(chunk_id: str, q_id: int):
+    conn = await _get_conn()
+    try:
+        await conn.execute(
+            "DELETE FROM question_embeddings WHERE id=$1 AND chunk_id=$2",
+            q_id, chunk_id,
+        )
+    finally:
+        await _release_conn(conn)
+
+
 @router.post("/documents/{doc_id}/chunks", status_code=201)
 async def create_chunk(doc_id: str, body: ChunkUpsert):
     import time as _time

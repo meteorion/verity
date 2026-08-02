@@ -94,29 +94,95 @@ async def hybrid_retrieve(
         min_score=cfg["dense_score_threshold"],
     )
 
+    dense_ids = [r["chunk_id"] for r in dense_rows]
+    row_map: dict[str, dict] = {r["chunk_id"]: dict(r) for r in dense_rows}
+    base_rankings = [dense_ids]
+    base_weights  = [1.0]
+
     if sparse_vec and _EMBEDDING_PROVIDER == "local":
         sparse_rows = await _sparse_search(
             pool, sparse_vec, roles, region, cfg["top_vector"], project_group,
         )
-        dense_ids = [r["chunk_id"] for r in dense_rows]
         sparse_ids = [r["chunk_id"] for r in sparse_rows]
+        row_map.update({r["chunk_id"]: dict(r) for r in sparse_rows})
         alpha = cfg["rrf_alpha"]
-        merged_ids = _rrf_merge([dense_ids, sparse_ids], weights=[alpha, 1.0 - alpha])
-        row_map = {r["chunk_id"]: dict(r) for r in [*dense_rows, *sparse_rows]}
-        candidates = [row_map[cid] for cid in merged_ids if cid in row_map]
-        logger.debug(
-            "Hybrid RRF merge: dense=%d sparse=%d merged=%d alpha=%.2f",
-            len(dense_ids), len(sparse_ids), len(candidates), alpha,
-        )
+        base_rankings = [dense_ids, sparse_ids]
+        base_weights  = [alpha, 1.0 - alpha]
+        logger.debug("Hybrid sparse+dense: dense=%d sparse=%d alpha=%.2f",
+                     len(dense_ids), len(sparse_ids), alpha)
     else:
-        candidates = [dict(r) for r in dense_rows]
-        logger.debug("Dense-only retrieval: candidates=%d", len(candidates))
+        logger.debug("Dense-only retrieval: candidates=%d", len(dense_ids))
+
+    # Initial merge (may be replaced below if question results arrive)
+    merged_ids = _rrf_merge(base_rankings, weights=base_weights)
+    candidates = [row_map[cid] for cid in merged_ids if cid in row_map]
+
+    # Question-augmentation: chunks whose LLM-generated questions match the query
+    question_rows = await _question_search(pool, dense_vec, roles, region, cfg["top_vector"], project_group)
+    question_ids = list(dict.fromkeys(r["chunk_id"] for r in question_rows))  # dedup, best first
+
+    if question_ids:
+        row_map.update({r["chunk_id"]: dict(r) for r in question_rows})
+        # Scale base weights to 0.7, question contribution = 0.3
+        scale = 0.7 / sum(base_weights)
+        final_ids = _rrf_merge(
+            base_rankings + [question_ids],
+            weights=[w * scale for w in base_weights] + [0.3],
+        )
+        candidates = [row_map[cid] for cid in final_ids if cid in row_map]
+        logger.debug("Question-augmented merge: q_chunks=%d final=%d", len(question_ids), len(candidates))
 
     passages = [c["content"] for c in candidates]
     ranked = rerank_mod.rerank(query, passages)
     results = [candidates[r["index"]] for r in ranked[:top_k] if r["index"] < len(candidates)]
     logger.info("Retrieval complete: top_k=%d returned=%d", top_k, len(results))
     return results
+
+
+async def _question_search(
+    pool: asyncpg.Pool,
+    vec: list[float],
+    roles: list[str],
+    region: str,
+    limit: int,
+    project_group: str | None = None,
+) -> list[asyncpg.Record]:
+    """Search question_embeddings; returns chunk rows ranked by best question match."""
+    vec_str = "[" + ",".join(str(v) for v in vec) + "]"
+    if roles:
+        acl_clause = "($2::text[] && c.acl OR 'role:public' = ANY(c.acl))"
+        args: list = [vec_str, roles, region, limit]
+        pg_idx = 5
+    else:
+        acl_clause = "'role:public' = ANY(c.acl)"
+        args = [vec_str, region, limit]
+        pg_idx = 4
+    pg_clause = ""
+    if project_group is not None:
+        pg_clause = f" AND (${pg_idx} = ANY(c.product_line) OR 'global' = ANY(c.product_line))"
+        args.append(project_group)
+    region_idx = 3 if roles else 2
+    limit_idx  = 4 if roles else 3
+
+    # Get top-limit question matches, then JOIN to chunks for content + ACL filter.
+    # DISTINCT ON ensures one row per chunk (best-matching question wins).
+    sql = f"""
+        SELECT DISTINCT ON (c.chunk_id)
+            c.chunk_id, c.doc_id, c.content, c.breadcrumb, c.source_url, c.title,
+            1 - (q.embedding <=> $1::vector) AS score
+        FROM question_embeddings q
+        JOIN chunks c ON c.chunk_id = q.chunk_id
+        WHERE {acl_clause}
+          AND (${region_idx} = ANY(c.region) OR 'global' = ANY(c.region))
+          AND (c.effective_from IS NULL OR c.effective_from <= now())
+          AND (c.effective_to   IS NULL OR c.effective_to   >  now())
+          AND c.is_parent = FALSE
+          {pg_clause}
+        ORDER BY c.chunk_id, q.embedding <=> $1::vector
+        LIMIT ${limit_idx}
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetch(sql, *args)
 
 
 async def _dense_search(
