@@ -28,3 +28,5 @@ class OrchestratorState(TypedDict):
     # Query rewrite / semantic cache
     cache_hit:        bool
     query_embedding:  list[float] | None
+    multi_queries:    list[str] | None   # sub-queries for parallel multi-retrieval
+    faq_context:      str | None         # soft FAQ hit (0.80~0.96); injected as extra context

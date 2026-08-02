@@ -92,6 +92,8 @@ async def chat(req: ChatRequest, request: Request):
                     "faq_hit": False,
                     "cache_hit": False,
                     "query_embedding": None,
+                    "multi_queries": None,
+                    "faq_context": None,
                     "transferred": False,
                     "transfer_reason": None,
                 },

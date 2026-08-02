@@ -154,12 +154,47 @@ async def write_cache(query: str, vec: list[float], answer: str, chunk_ids: list
 
 
 # ---------------------------------------------------------------------------
+# Multi-query expansion (P2)
+# ---------------------------------------------------------------------------
+
+_COMPLEX_CONNECTORS = {"和", "与", "或", "以及", "还有", "同时", "另外"}
+
+
+def _should_expand(query: str, intent: str | None) -> bool:
+    """True for product comparison / long queries that benefit from sub-query diversity."""
+    return (
+        intent == "product_inquiry"
+        or len(query) > 20
+        or any(c in query for c in _COMPLEX_CONNECTORS)
+    )
+
+
+async def _multi_query_expand(query: str, n: int = 3) -> list[str]:
+    from inference.llm import get_llm
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    system = (
+        f"将用户问题改写为{n}个不同检索角度的子问题，每行一个，"
+        "不要编号、不要解释，不要输出原问题。"
+    )
+    user = f"问题：{query}"
+    llm = get_llm(max_tokens=200, temperature=0.3)
+    resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
+    content = resp.content
+    if isinstance(content, list):
+        content = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    lines = [ln.strip() for ln in content.strip().splitlines() if ln.strip()]
+    return lines[:n]
+
+
+# ---------------------------------------------------------------------------
 # Graph node
 # ---------------------------------------------------------------------------
 
 async def rewrite_node(state: OrchestratorState) -> dict:
     query = normalize_query(state["query_raw"])
     history = state.get("history_recent") or []
+    intent = state.get("intent")
 
     # Embed query (dense only; sparse not needed for cache/rewrite)
     from inference import embedding as emb_mod
@@ -174,23 +209,43 @@ async def rewrite_node(state: OrchestratorState) -> dict:
             "query_embedding": vec,
             "cache_hit": True,
             "answer_stream": cached["answer"],
+            "multi_queries": None,
         }
 
-    # 2. Coreference rewrite
+    # 2. Coreference rewrite + multi-query expansion (run concurrently if both needed)
     rewritten = query
-    if _should_rewrite(query, history):
-        try:
-            rewritten = await _llm_rewrite(query, history)
-            if rewritten != query:
-                logger.info(
-                    "Query rewritten [session=%s] %r → %r",
-                    state.get("session_id"), query, rewritten,
-                )
-        except Exception as exc:
-            logger.warning("LLM rewrite failed (%s); using normalized query", exc)
+    multi_queries: list[str] | None = None
+
+    do_rewrite = _should_rewrite(query, history)
+    do_expand = _should_expand(query, intent)
+
+    tasks = []
+    if do_rewrite:
+        tasks.append(_llm_rewrite(query, history))
+    if do_expand:
+        tasks.append(_multi_query_expand(query))
+
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        idx = 0
+        if do_rewrite:
+            r = results[idx]; idx += 1
+            if isinstance(r, str) and r != query:
+                rewritten = r
+                logger.info("Query rewritten [session=%s] %r → %r", state.get("session_id"), query, rewritten)
+            elif isinstance(r, Exception):
+                logger.warning("LLM rewrite failed (%s)", r)
+        if do_expand:
+            r = results[idx]
+            if isinstance(r, list) and r:
+                multi_queries = r
+                logger.info("Multi-query expanded [session=%s] n=%d", state.get("session_id"), len(r))
+            elif isinstance(r, Exception):
+                logger.warning("Multi-query expand failed (%s)", r)
 
     return {
         "query_rewritten": rewritten,
         "query_embedding": vec,
         "cache_hit": False,
+        "multi_queries": multi_queries,
     }

@@ -101,7 +101,7 @@ async def generate_node(state: OrchestratorState) -> dict:
     history = state.get("history_recent", [])
     summary = state.get("history_summary") or ""
 
-    knowledge = _build_knowledge(chunks, tool_results)
+    knowledge = _build_knowledge(chunks, tool_results, state.get("faq_context"))
     messages = _build_messages(history, summary, state["query_raw"], knowledge)
 
     temperature = state.get("llm_temperature")
@@ -143,8 +143,10 @@ async def generate_node(state: OrchestratorState) -> dict:
     return {"answer_stream": answer, "nli_flags": []}
 
 
-def _build_knowledge(chunks: list[dict], tool_results: list[dict]) -> str:
+def _build_knowledge(chunks: list[dict], tool_results: list[dict], faq_context: str | None = None) -> str:
     parts = []
+    if faq_context:
+        parts.append(f"[FAQ参考]\n{faq_context}")
     for c in chunks:
         idx = c.get("_src_idx", 1)
         crumb = c.get("breadcrumb", "")

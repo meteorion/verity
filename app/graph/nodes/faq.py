@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -11,18 +12,27 @@ logger = logging.getLogger(__name__)
 
 _REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 _FAQ_SCAN_LIMIT = 200
-_FAQ_CACHE_TTL = 30.0  # seconds
+_FAQ_TEXT_TTL  = 30.0   # seconds — text refreshes quickly so edits appear fast
+_FAQ_EMBED_TTL = 300.0  # seconds — embeddings are expensive; 5-min is fine
 
-# In-process cache of (question_lower, answer) pairs. faq_node runs on nearly
-# every turn and FAQ misses are the common case, so scanning all faq:* keys and
-# GET-ing each one per query is wasteful. Load them once per TTL window and match
-# in memory instead; new/edited FAQs take up to _FAQ_CACHE_TTL seconds to appear.
-_faq_cache: list[tuple[str, str]] | None = None
-_faq_cache_at: float = 0.0
+# Cache A: plain (question_lower, answer) pairs for exact string match
+_faq_text_cache: list[tuple[str, str]] | None = None
+_faq_text_cache_at: float = 0.0
 
+# Cache B: (question_lower, answer, embedding) triples for semantic match
+_faq_embed_cache: list[tuple[str, str, list[float] | None]] | None = None
+_faq_embed_cache_at: float = 0.0
+
+# Thresholds
+_HARD_THRESHOLD = float(os.getenv("FAQ_SEMANTIC_HARD_THRESHOLD", "0.96"))
+_SOFT_THRESHOLD = float(os.getenv("FAQ_SEMANTIC_SOFT_THRESHOLD", "0.80"))
+
+
+# ---------------------------------------------------------------------------
+# Redis helpers
+# ---------------------------------------------------------------------------
 
 async def _load_faq_entries() -> list[tuple[str, str]]:
-    """Scan Redis once and return [(question_lower, answer), ...]."""
     entries: list[tuple[str, str]] = []
     client = aioredis.from_url(_REDIS_URL, decode_responses=True)
     async with client:
@@ -34,7 +44,6 @@ async def _load_faq_entries() -> list[tuple[str, str]]:
                 if scanned >= _FAQ_SCAN_LIMIT:
                     break
                 scanned += 1
-                # Support both storage formats: JSON string (SET) or Redis Hash (HSET).
                 entry: dict = {}
                 val = await client.get(key)
                 if val:
@@ -52,30 +61,97 @@ async def _load_faq_entries() -> list[tuple[str, str]]:
     return entries
 
 
-async def _get_faq_entries() -> list[tuple[str, str]]:
-    global _faq_cache, _faq_cache_at
+async def _get_faq_text() -> list[tuple[str, str]]:
+    global _faq_text_cache, _faq_text_cache_at
     now = time.monotonic()
-    if _faq_cache is not None and now - _faq_cache_at < _FAQ_CACHE_TTL:
-        return _faq_cache
+    if _faq_text_cache is not None and now - _faq_text_cache_at < _FAQ_TEXT_TTL:
+        return _faq_text_cache
     try:
-        _faq_cache = await _load_faq_entries()
-        _faq_cache_at = now
+        _faq_text_cache = await _load_faq_entries()
+        _faq_text_cache_at = now
     except Exception as e:
-        # Redis unavailable — degrade gracefully: serve a stale cache if we have
-        # one, otherwise behave as "no FAQ" and fall through to RAG.
-        logger.warning("FAQ refresh failed (%s); %s", e, "using stale cache" if _faq_cache else "skipping FAQ")
-        if _faq_cache is None:
+        logger.warning("FAQ text refresh failed (%s); %s", e,
+                       "using stale cache" if _faq_text_cache else "skipping FAQ")
+        if _faq_text_cache is None:
             return []
-    return _faq_cache
+    return _faq_text_cache
 
+
+async def _get_faq_with_embeddings() -> list[tuple[str, str, list[float] | None]]:
+    """Return FAQ entries with embeddings; re-embeds when cache expires."""
+    global _faq_embed_cache, _faq_embed_cache_at
+    now = time.monotonic()
+    if _faq_embed_cache is not None and now - _faq_embed_cache_at < _FAQ_EMBED_TTL:
+        return _faq_embed_cache
+
+    text_entries = await _get_faq_text()
+    if not text_entries:
+        _faq_embed_cache = []
+        _faq_embed_cache_at = now
+        return []
+
+    questions = [q for q, _ in text_entries]
+    try:
+        from inference import embedding as emb_mod
+        embed_results = await asyncio.to_thread(emb_mod.embed, questions, mode="dense")
+        embeddings: list[list[float] | None] = [r.dense for r in embed_results]
+    except Exception as exc:
+        logger.warning("FAQ embedding failed (%s); falling back to text-only match", exc)
+        embeddings = [None] * len(text_entries)
+
+    _faq_embed_cache = [
+        (q, a, emb) for (q, a), emb in zip(text_entries, embeddings)
+    ]
+    _faq_embed_cache_at = now
+    return _faq_embed_cache
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na  = sum(x * x for x in a) ** 0.5
+    nb  = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Graph node
+# ---------------------------------------------------------------------------
 
 async def faq_node(state: OrchestratorState) -> dict:
-    query_lower = state["query_raw"].lower().strip()
+    query_raw   = state["query_raw"]
+    query_lower = query_raw.lower().strip()
 
-    for question, answer in await _get_faq_entries():
-        if question in query_lower or query_lower in question:
-            logger.info("FAQ hit [session=%s query=%r]", state.get("session_id"), query_lower[:60])
-            return {"faq_hit": True, "answer_stream": answer, "intent": "faq"}
+    entries = await _get_faq_with_embeddings()
+
+    # 1. Exact string match (zero-cost, handles typo-free standard phrases)
+    for q, a, _ in entries:
+        if q in query_lower or query_lower in q:
+            logger.info("FAQ exact hit [session=%s query=%r]", state.get("session_id"), query_lower[:60])
+            return {"faq_hit": True, "answer_stream": a, "intent": "faq", "faq_context": None}
+
+    # 2. Semantic match — only if at least one FAQ has an embedding
+    if any(emb is not None for _, _, emb in entries):
+        try:
+            from inference import embedding as emb_mod
+            qvec_results = await asyncio.to_thread(emb_mod.embed, [query_raw], mode="dense")
+            qvec = qvec_results[0].dense
+
+            best_score, best_answer = 0.0, ""
+            for _, a, evec in entries:
+                if evec is None:
+                    continue
+                score = _cosine(qvec, evec)
+                if score > best_score:
+                    best_score, best_answer = score, a
+
+            if best_score >= _HARD_THRESHOLD:
+                logger.info("FAQ semantic HIT [session=%s score=%.3f]", state.get("session_id"), best_score)
+                return {"faq_hit": True, "answer_stream": best_answer, "intent": "faq", "faq_context": None}
+            if best_score >= _SOFT_THRESHOLD:
+                logger.info("FAQ soft hit [session=%s score=%.3f]; injecting as context", state.get("session_id"), best_score)
+                return {"faq_hit": False, "answer_stream": None, "faq_context": best_answer}
+        except Exception as exc:
+            logger.warning("FAQ semantic match failed (%s)", exc)
 
     logger.debug("FAQ miss [session=%s query=%r]", state.get("session_id"), query_lower[:60])
-    return {"faq_hit": False, "answer_stream": None}
+    return {"faq_hit": False, "answer_stream": None, "faq_context": None}
