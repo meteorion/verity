@@ -1,4 +1,3 @@
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 
 from graph.state import OrchestratorState
@@ -35,17 +34,7 @@ def _route_after_intent(state: OrchestratorState) -> str:
             return "rag"
 
 
-_graph = None
-
-
-def get_graph():
-    global _graph
-    if _graph is None:
-        _graph = build_graph()
-    return _graph
-
-
-def build_graph():
+def build_graph(checkpointer=None):
     g = StateGraph(OrchestratorState)
 
     g.add_node("safety", safety_node)
@@ -65,5 +54,7 @@ def build_graph():
     g.add_edge("generate", END)
     g.add_edge("transfer", END)
 
-    checkpointer = MemorySaver()
+    if checkpointer is None:
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
     return g.compile(checkpointer=checkpointer)

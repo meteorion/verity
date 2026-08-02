@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
 import { BUSINESS_LINES as BUSINESS_LINE_OPTIONS } from '../config.js'
+import { apiFetch } from '../auth.js'
 
 const ACL_OPTIONS = [
   { value: 'role:public',   label: '公开',   desc: '所有用户（含游客）' },
@@ -16,6 +19,52 @@ const ACL_TONE = {
   'role:agent':    'bg-indigo-50 text-indigo-600',
   'role:admin':    'bg-violet-50 text-violet-600',
 }
+
+// Catch-all ('global' project group / 'role:public' access) is mutually
+// exclusive with specific entries: picking it clears the rest; picking a
+// specific entry drops the catch-all. Empty selection falls back to catch-all.
+function toggleExclusive(list, value, catchAll) {
+  if (value === catchAll) return [catchAll]
+  const rest = list.filter((v) => v !== catchAll)
+  const next = rest.includes(value) ? rest.filter((v) => v !== value) : [...rest, value]
+  return next.length ? next : [catchAll]
+}
+
+// Pill multi-select with a visually distinct, mutually-exclusive catch-all
+// (rendered first, separated by a divider). Shared by the project-group and
+// access-permission selectors so their behaviour and look stay identical.
+function PillSelect({ options, selected, catchAll, onToggle, disabled = false, size = 'md' }) {
+  const shape = size === 'sm' ? 'px-2 py-0.5 rounded' : 'px-3 py-1 rounded-full'
+  const pill = (o, activeCls) => {
+    const active = selected.includes(o.key)
+    return (
+      <button
+        key={o.key}
+        type="button"
+        onClick={() => onToggle(o.key)}
+        disabled={disabled}
+        title={o.title}
+        className={`${shape} text-xs font-medium transition-colors ${
+          active ? activeCls : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
+        }`}
+      >
+        {o.label}
+      </button>
+    )
+  }
+  const catchOpt = options.find((o) => o.key === catchAll)
+  const rest = options.filter((o) => o.key !== catchAll)
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      {catchOpt && pill(catchOpt, 'bg-slate-600 text-white')}
+      {catchOpt && rest.length > 0 && <span className="text-slate-200 select-none">|</span>}
+      {rest.map((o) => pill(o, 'bg-indigo-600 text-white'))}
+    </div>
+  )
+}
+
+const aclPillOptions = ACL_OPTIONS.map((o) => ({ key: o.value, label: o.label, title: o.desc }))
+const groupPillOptions = (groups) => groups.map((g) => ({ key: g.group_id, label: g.name }))
 
 const STATUS_LABEL = {
   active: '已生效',
@@ -89,11 +138,11 @@ export default function KnowledgeBase() {
     setError(null)
     try {
       const [active, pending, rejected, metricsRes, groupsRes] = await Promise.all([
-        fetch('/api/ops/documents?status=active&limit=200').then((r) => r.json()),
-        fetch('/api/ops/documents?status=pending&limit=200').then((r) => r.json()),
-        fetch('/api/ops/documents?status=rejected&limit=200').then((r) => r.json()),
-        fetch('/api/ops/metrics').then((r) => r.json()),
-        fetch('/api/ops/groups').then((r) => r.json()),
+        apiFetch('/api/ops/documents?status=active&limit=200').then((r) => r.json()),
+        apiFetch('/api/ops/documents?status=pending&limit=200').then((r) => r.json()),
+        apiFetch('/api/ops/documents?status=rejected&limit=200').then((r) => r.json()),
+        apiFetch('/api/ops/metrics').then((r) => r.json()),
+        apiFetch('/api/ops/groups').then((r) => r.json()),
       ])
       const all = [
         ...(active.documents ?? []),
@@ -156,7 +205,7 @@ export default function KnowledgeBase() {
 
   async function disableDoc(doc_id) {
     try {
-      const res = await fetch(`/api/ops/documents/${doc_id}/disable`, { method: 'POST' })
+      const res = await apiFetch(`/api/ops/documents/${doc_id}/disable`, { method: 'POST' })
       if (!res.ok) throw new Error(await res.text())
       await loadDocs()
     } catch (e) {
@@ -167,7 +216,7 @@ export default function KnowledgeBase() {
   async function deleteDoc(doc_id) {
     if (!confirm('确认删除？文档及所有知识块将被永久移除，无法恢复。')) return
     try {
-      const res = await fetch(`/api/ops/documents/${doc_id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/ops/documents/${doc_id}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(await res.text())
       if (detailId === doc_id) setDetailId(null)
       await loadDocs()
@@ -178,7 +227,7 @@ export default function KnowledgeBase() {
 
   async function rebuildDoc(doc_id, file = null) {
     const body = file ? (() => { const fd = new FormData(); fd.append('file', file); return fd })() : undefined
-    const res = await fetch(`/api/ops/documents/${doc_id}/rebuild`, { method: 'POST', body })
+    const res = await apiFetch(`/api/ops/documents/${doc_id}/rebuild`, { method: 'POST', body })
     if (!res.ok) throw new Error(await res.text())
     await loadDocs()
   }
@@ -187,7 +236,7 @@ export default function KnowledgeBase() {
     try {
       await Promise.all(
         [...selectedIds].map((id) =>
-          fetch(`/api/ops/documents/${id}/disable`, { method: 'POST' })
+          apiFetch(`/api/ops/documents/${id}/disable`, { method: 'POST' })
         )
       )
       setSelectedIds(new Set())
@@ -202,7 +251,7 @@ export default function KnowledgeBase() {
     try {
       await Promise.all(
         [...selectedIds].map((id) =>
-          fetch(`/api/ops/documents/${id}`, { method: 'DELETE' })
+          apiFetch(`/api/ops/documents/${id}`, { method: 'DELETE' })
         )
       )
       setSelectedIds(new Set())
@@ -369,8 +418,131 @@ export default function KnowledgeBase() {
   )
 }
 
+function DocEditModal({ doc, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    title: doc.title ?? '',
+    owner_email: doc.owner_email ?? '',
+    business_line: doc.business_line ?? '',
+    version: doc.version ?? '',
+    source_url: doc.source_url ?? '',
+    effective_from: doc.effective_from ? String(doc.effective_from).slice(0, 16).replace(' ', 'T') : '',
+    effective_to: doc.effective_to ? String(doc.effective_to).slice(0, 16).replace(' ', 'T') : '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+
+  function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
+
+  async function handleSubmit() {
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await apiFetch(`/api/ops/documents/${doc.doc_id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      onSaved()
+      onClose()
+    } catch (e) {
+      setError(e.message)
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl w-full max-w-md p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-800">编辑文档信息</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">标题 <span className="text-red-400">*</span></label>
+            <input
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+              value={form.title}
+              onChange={(e) => set('title', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">Owner 邮箱</label>
+            <input
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+              value={form.owner_email}
+              onChange={(e) => set('owner_email', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">业务线</label>
+            <Select
+              className="w-full"
+              value={form.business_line}
+              onChange={(v) => set('business_line', v)}
+              options={BUSINESS_LINE_OPTIONS}
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">版本</label>
+            <input
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+              value={form.version}
+              onChange={(e) => set('version', e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">原文链接</label>
+            <input
+              type="url"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+              placeholder="https://"
+              value={form.source_url}
+              onChange={(e) => set('source_url', e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">生效时间</label>
+              <input
+                type="datetime-local"
+                className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-400"
+                value={form.effective_from}
+                onChange={(e) => set('effective_from', e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">失效时间</label>
+              <input
+                type="datetime-local"
+                className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-400"
+                value={form.effective_to}
+                onChange={(e) => set('effective_to', e.target.value)}
+              />
+            </div>
+          </div>
+        </div>
+
+        {error && <p className="text-xs text-red-500">{error}</p>}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button size="sm" onClick={onClose} disabled={saving}>取消</Button>
+          <Button size="sm" variant="primary" onClick={handleSubmit} disabled={saving || !form.title.trim()}>
+            {saving ? '保存中…' : '保存'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChange }) {
   const [saving, setSaving] = useState(false)
+  const [showEdit, setShowEdit] = useState(false)
   const [showRebuild, setShowRebuild] = useState(false)
   const [showChunks, setShowChunks] = useState(false)
   const [showAdmission, setShowAdmission] = useState(false)
@@ -379,13 +551,10 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
 
   async function toggleAcl(role) {
     if (!doc) return
-    const next = docAcl.includes(role)
-      ? docAcl.filter((r) => r !== role)
-      : [...docAcl, role]
-    const final = next.length ? next : ['role:public']
+    const final = toggleExclusive(docAcl, role, 'role:public')
     setSaving(true)
     try {
-      await fetch(`/api/ops/documents/${doc.doc_id}/acl`, {
+      await apiFetch(`/api/ops/documents/${doc.doc_id}/acl`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ acl: final }),
@@ -398,13 +567,10 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
 
   async function toggleGroup(gid) {
     if (!doc) return
-    const next = docGroupIds.includes(gid)
-      ? docGroupIds.filter((id) => id !== gid)
-      : [...docGroupIds, gid]
-    const final = next.length ? next : ['global']
+    const final = toggleExclusive(docGroupIds, gid, 'global')
     setSaving(true)
     try {
-      await fetch(`/api/ops/documents/${doc.doc_id}/groups`, {
+      await apiFetch(`/api/ops/documents/${doc.doc_id}/groups`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ group_ids: final }),
@@ -426,8 +592,24 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
       </div>
 
       <DetailRow label="Owner" value={doc.owner_email} />
-      <DetailRow label="业务线" value={doc.business_line} />
-      <DetailRow label="状态" value={STATUS_LABEL[doc.status] ?? doc.status} />
+      <DetailRow label="来源类型" value={doc.source_type} />
+      <DetailRow label="版本" value={doc.version} />
+      <DetailRow label="生效时间" value={fmtDate(doc.effective_from)} />
+      <DetailRow label="失效时间" value={fmtDate(doc.effective_to)} />
+      {doc.source_url && (
+        <div className="flex items-center justify-between border-b border-slate-50 pb-1.5 text-xs">
+          <span className="text-slate-400 shrink-0">原文链接</span>
+          <a
+            href={doc.source_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-indigo-500 underline truncate max-w-[150px]"
+            title={doc.source_url}
+          >
+            {doc.source_url}
+          </a>
+        </div>
+      )}
 
       <div className="flex items-center justify-between border-b border-slate-50 pb-1.5 text-xs">
         <span className="text-slate-400">Chunk 数</span>
@@ -441,50 +623,28 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
           </button>
         </div>
       </div>
-
-      <DetailRow label="更新时间" value={fmtDate(doc.updated_at)} />
-
       <div>
         <p className="text-xs text-slate-400 mb-2">项目组归属 {saving && <span className="text-indigo-400">保存中…</span>}</p>
-        <div className="flex flex-wrap gap-1.5">
-          {groups.map((g) => {
-            const active = docGroupIds.includes(g.group_id)
-            return (
-              <button
-                key={g.group_id}
-                onClick={() => toggleGroup(g.group_id)}
-                disabled={saving}
-                className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
-                  active ? 'bg-indigo-600 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
-                }`}
-              >
-                {g.name}
-              </button>
-            )
-          })}
-        </div>
+        <PillSelect
+          options={groupPillOptions(groups)}
+          selected={docGroupIds}
+          catchAll="global"
+          onToggle={toggleGroup}
+          disabled={saving}
+          size="sm"
+        />
       </div>
 
       <div>
         <p className="text-xs text-slate-400 mb-2">访问权限 {saving && <span className="text-indigo-400">保存中…</span>}</p>
-        <div className="flex flex-wrap gap-1.5">
-          {ACL_OPTIONS.map((opt) => {
-            const active = docAcl.includes(opt.value)
-            return (
-              <button
-                key={opt.value}
-                onClick={() => toggleAcl(opt.value)}
-                disabled={saving}
-                title={opt.desc}
-                className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
-                  active ? 'bg-indigo-600 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
-                }`}
-              >
-                {opt.label}
-              </button>
-            )
-          })}
-        </div>
+        <PillSelect
+          options={aclPillOptions}
+          selected={docAcl}
+          catchAll="role:public"
+          onToggle={toggleAcl}
+          disabled={saving}
+          size="sm"
+        />
       </div>
 
       <div className="flex items-center justify-between border-b border-slate-50 pb-1.5 text-xs">
@@ -501,12 +661,21 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
       </div>
 
       <div className="pt-2 flex gap-2 flex-wrap">
+        <Button size="sm" onClick={() => setShowEdit(true)}>编辑</Button>
         <Button size="sm" variant="primary" className="w-20" disabled={saving} onClick={() => setShowRebuild(true)}>重构</Button>
         {doc.status !== 'rejected' && (
           <Button size="sm" variant="warning" className="w-20" disabled={saving} onClick={() => onDisable(doc.doc_id)}>下架</Button>
         )}
         <Button size="sm" variant="danger-solid" className="w-20" disabled={saving} onClick={() => onDelete(doc.doc_id)}>删除</Button>
       </div>
+
+      {showEdit && (
+        <DocEditModal
+          doc={doc}
+          onClose={() => setShowEdit(false)}
+          onSaved={onGroupsChange}
+        />
+      )}
 
       {showRebuild && (
         <RebuildModal
@@ -550,25 +719,11 @@ function UploadModal({ groups, onClose, onSuccess }) {
   const [uploadError, setUploadError] = useState(null)
 
   function toggleAclRole(role) {
-    setSelectedAcl((prev) => {
-      const next = prev.includes(role) ? prev.filter((r) => r !== role) : [...prev, role]
-      return next.length ? next : ['role:public']
-    })
+    setSelectedAcl((prev) => toggleExclusive(prev, role, 'role:public'))
   }
 
   function toggleGroup(gid) {
-    setSelectedGroups((prev) => {
-      if (gid === 'global') {
-        // 全局共享：独占，取消其他所有选择
-        return prev.includes('global') ? ['global'] : ['global']
-      }
-      // 选了具体项目组：移除 global，再切换该组
-      const withoutGlobal = prev.filter((id) => id !== 'global')
-      const next = withoutGlobal.includes(gid)
-        ? withoutGlobal.filter((id) => id !== gid)
-        : [...withoutGlobal, gid]
-      return next.length ? next : ['global']  // 全部取消时回退到 global
-    })
+    setSelectedGroups((prev) => toggleExclusive(prev, gid, 'global'))
   }
 
   async function handleSubmit() {
@@ -591,7 +746,7 @@ function UploadModal({ groups, onClose, onSuccess }) {
       if (effectiveFrom) fd.append('effective_from', effectiveFrom)
       if (effectiveTo) fd.append('effective_to', effectiveTo)
 
-      const res = await fetch('/api/pipeline/ingest', { method: 'POST', body: fd })
+      const res = await apiFetch('/api/pipeline/ingest', { method: 'POST', body: fd })
       if (!res.ok) throw new Error(await res.text())
       onSuccess()
     } catch (e) {
@@ -691,52 +846,22 @@ function UploadModal({ groups, onClose, onSuccess }) {
 
         <div>
           <label className="text-xs text-slate-500 block mb-2">项目组归属</label>
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* 全局共享 — 独占选项 */}
-            {groups.filter((g) => g.group_id === 'global').map((g) => {
-              const active = selectedGroups.includes('global')
-              return (
-                <button key={g.group_id} type="button" onClick={() => toggleGroup('global')}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    active ? 'bg-slate-600 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
-                  }`}>
-                  {g.name}
-                </button>
-              )
-            })}
-            {/* 分隔线 */}
-            <span className="text-slate-200 select-none">|</span>
-            {/* 具体项目组 — 可多选，与 global 互斥 */}
-            {groups.filter((g) => g.group_id !== 'global').map((g) => {
-              const active = selectedGroups.includes(g.group_id)
-              return (
-                <button key={g.group_id} type="button" onClick={() => toggleGroup(g.group_id)}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    active ? 'bg-indigo-600 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
-                  }`}>
-                  {g.name}
-                </button>
-              )
-            })}
-          </div>
+          <PillSelect
+            options={groupPillOptions(groups)}
+            selected={selectedGroups}
+            catchAll="global"
+            onToggle={toggleGroup}
+          />
         </div>
 
         <div>
           <label className="text-xs text-slate-500 block mb-2">访问权限</label>
-          <div className="flex items-center gap-2 flex-wrap">
-            {ACL_OPTIONS.map((opt) => {
-              const active = selectedAcl.includes(opt.value)
-              return (
-                <button key={opt.value} type="button" onClick={() => toggleAclRole(opt.value)}
-                  title={opt.desc}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    active ? 'bg-indigo-600 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
-                  }`}>
-                  {opt.label}
-                </button>
-              )
-            })}
-          </div>
+          <PillSelect
+            options={aclPillOptions}
+            selected={selectedAcl}
+            catchAll="role:public"
+            onToggle={toggleAclRole}
+          />
           <p className="text-[11px] text-slate-400 mt-1.5">
             公开：所有人可见 / 客户：已登录 / 客服、管理员：内部权限
           </p>
@@ -840,7 +965,7 @@ function ChunksModal({ doc, onClose }) {
   const loadChunks = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch(`/api/ops/documents/${doc.doc_id}/chunks`)
+      const res = await apiFetch(`/api/ops/documents/${doc.doc_id}/chunks`)
       const data = await res.json()
       setChunks(data.chunks ?? [])
     } catch {
@@ -855,7 +980,7 @@ function ChunksModal({ doc, onClose }) {
   async function deleteChunk(chunk_id) {
     if (!confirm('确认删除该知识块？此操作不可恢复。')) return
     try {
-      const res = await fetch(`/api/ops/chunks/${chunk_id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/ops/chunks/${chunk_id}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(await res.text())
       await loadChunks()
     } catch (e) {
@@ -868,7 +993,7 @@ function ChunksModal({ doc, onClose }) {
     const url = isNew
       ? `/api/ops/documents/${doc.doc_id}/chunks`
       : `/api/ops/chunks/${chunk_id}`
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method: isNew ? 'POST' : 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, breadcrumb, content }),
@@ -922,9 +1047,27 @@ function ChunksModal({ doc, onClose }) {
                       {c.breadcrumb || c.title}
                     </p>
                   )}
-                  <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
-                    {c.content}
-                  </p>
+                  <div className="text-xs text-slate-700 leading-relaxed bg-slate-50 rounded-lg px-3 py-2 mt-1">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        h1: ({ ...p }) => <p className="font-semibold mb-1" {...p} />,
+                        h2: ({ ...p }) => <p className="font-semibold mb-1" {...p} />,
+                        h3: ({ ...p }) => <p className="font-semibold mb-0.5" {...p} />,
+                        p: ({ ...p }) => <p className="mb-1 last:mb-0" {...p} />,
+                        ul: ({ ...p }) => <ul className="list-disc list-inside mb-1" {...p} />,
+                        ol: ({ ...p }) => <ol className="list-decimal list-inside mb-1" {...p} />,
+                        code: ({ ...p }) => <code className="bg-slate-200 rounded px-0.5 font-mono text-[11px]" {...p} />,
+                        pre: ({ ...p }) => <pre className="bg-slate-200 rounded p-1.5 font-mono text-[11px] overflow-x-auto my-1" {...p} />,
+                        a: ({ ...p }) => <span className="text-indigo-500 underline" {...p} />,
+                        table: ({ ...p }) => <table className="text-[11px] border-collapse mb-1" {...p} />,
+                        th: ({ ...p }) => <th className="border border-slate-200 px-1.5 py-0.5 bg-slate-100 font-semibold text-left" {...p} />,
+                        td: ({ ...p }) => <td className="border border-slate-200 px-1.5 py-0.5" {...p} />,
+                      }}
+                    >
+                      {c.content ?? ''}
+                    </ReactMarkdown>
+                  </div>
                   <div className="flex items-center gap-3 flex-wrap">
                     <p className="text-[11px] text-slate-300 font-mono">{c.chunk_id}</p>
                     {c.version && (
@@ -961,7 +1104,7 @@ function AdmissionModal({ doc, onClose }) {
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    fetch(`/api/ops/documents/${doc.doc_id}/admission`)
+    apiFetch(`/api/ops/documents/${doc.doc_id}/admission`)
       .then((r) => r.json())
       .then((d) => { setData(d); setLoading(false) })
       .catch((e) => { setError(e.message); setLoading(false) })

@@ -20,7 +20,13 @@ const paths = {
   'trash-2': 'M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6 M10 11v6 M14 11v6',
   'refresh-cw': 'M21 2v6h-6 M3 12a9 9 0 0 1 15-6.7L21 8 M3 22v-6h6 M21 12a9 9 0 0 1-15 6.7L3 16',
   'chevron-up': 'M18 15l-6-6-6 6',
-  'chevron-down': 'M6 9l6 6 6-6'
+  'chevron-down': 'M6 9l6 6 6-6',
+  target: 'M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10Z M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12Z M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  layers: 'M12 2l8 4.5v1L12 12 4 7.5v-1L12 2Z M4 12l8 4.5 8-4.5 M4 17l8 4.5 8-4.5',
+  download: 'M12 16V4 M6 18l6 6 6-6 M4 20h16',
+  edit: 'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7 M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5Z',
+  trash: 'M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6',
+  inbox: 'M22 13V19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V13M2 13l3.5-9h13L22 13M8 13h8'
 }
 
 export default function Icon({ name, size = 18, className = '' }) {

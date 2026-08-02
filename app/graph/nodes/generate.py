@@ -19,9 +19,8 @@ from inference.nli import nli_check
 
 logger = logging.getLogger(__name__)
 
-_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
-_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
-_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "800"))
+_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
+_MODEL = os.getenv("LLM_MODEL", "qwen-plus")
 _TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
 # File-based fallback prompt loaded once at startup
@@ -167,61 +166,19 @@ def _build_messages(
 
 
 async def _call_llm(messages: list[dict], temperature: float, system_prompt: str) -> str:
-    if _LLM_PROVIDER == "litellm":
-        return await _call_litellm(messages, temperature, system_prompt)
-    if _LLM_PROVIDER == "openai":
-        return await _call_openai_compatible(messages, temperature, system_prompt)
-    return await _call_anthropic(messages, temperature, system_prompt)
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+    from inference.llm import get_llm
 
+    lc_messages = [SystemMessage(content=system_prompt)]
+    for msg in messages:
+        if msg["role"] == "user":
+            lc_messages.append(HumanMessage(content=msg["content"]))
+        else:
+            lc_messages.append(AIMessage(content=msg["content"]))
 
-async def _call_anthropic(messages: list[dict], temperature: float, system_prompt: str) -> str:
-    import anthropic
-    client = anthropic.AsyncAnthropic()
-    response = await client.messages.create(
-        model=_MODEL,
-        max_tokens=_MAX_TOKENS,
-        temperature=temperature,
-        system=system_prompt,
-        messages=messages,
-    )
-    return response.content[0].text
-
-
-async def _call_openai_compatible(messages: list[dict], temperature: float, system_prompt: str) -> str:
-    import httpx
-    api_base = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
-    api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-    payload = {
-        "model": _MODEL,
-        "messages": [{"role": "system", "content": system_prompt}, *messages],
-        "max_tokens": _MAX_TOKENS,
-        "temperature": temperature,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{api_base}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-
-
-async def _call_litellm(messages: list[dict], temperature: float, system_prompt: str) -> str:
-    import httpx
-    litellm_url = os.getenv("LITELLM_URL", "http://litellm:4000")
-    master_key = os.getenv("LITELLM_MASTER_KEY", "")
-    payload = {
-        "model": _MODEL,
-        "messages": [{"role": "system", "content": system_prompt}, *messages],
-        "max_tokens": _MAX_TOKENS,
-        "temperature": temperature,
-    }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{litellm_url}/chat/completions",
-            headers={"Authorization": f"Bearer {master_key}"},
-            json=payload,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+    llm = get_llm(temperature=temperature)
+    response = await llm.ainvoke(lc_messages)
+    content = response.content
+    if isinstance(content, list):
+        content = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    return content

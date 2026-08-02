@@ -58,8 +58,10 @@ async def chat(req: ChatRequest, request: Request):
 
     graph = request.app.state.graph
 
-    top_k = int(req.options.get("top_k", 6))
-    temperature = float(req.options.get("temperature", 0.2))
+    from api.settings import load_settings as _ls
+    _s = _ls()
+    top_k = int(req.options.get("top_k", _s.get("retrieval_top_k", 6)))
+    temperature = float(req.options.get("temperature", _s.get("llm_temperature", 0.2)))
 
     async def event_stream():
         last_chunks: list[dict] = []

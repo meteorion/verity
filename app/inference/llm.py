@@ -1,38 +1,53 @@
-"""Chat LLM 调用 — 网关方案待确认（LiteLLM vs 直连 SDK，见 doc/plan.md §3.11）。
+"""Unified LangChain chat model factory.
 
-P1 先直连通义千问（DashScope OpenAI 兼容模式），已验证可用（见 config/litellm.yaml 注释）。
-对外只暴露 stream_chat()，后续切换 LiteLLM 网关或换模型只改这个模块内部实现，
-graph/nodes/generate.py 不用跟着改。
+get_llm() returns a configured ChatOpenAI based on LLM_PROVIDER:
+  openai  (default) → ChatOpenAI (any OpenAI-compatible endpoint, e.g. DashScope)
+  litellm           → ChatOpenAI pointing at LiteLLM gateway
+
+All provider-specific env-var reading lives here so callers never branch on LLM_PROVIDER.
 """
 import os
-from collections.abc import AsyncIterator
 
-from openai import AsyncOpenAI
+from langchain_openai import ChatOpenAI
 
+_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 _MODEL = os.getenv("LLM_MODEL", "qwen-plus")
-_BASE_URL = os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-_API_KEY = os.getenv("QWEN_API_KEY", "")
+_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "800"))
 _TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
-_client: AsyncOpenAI | None = None
 
+def get_llm(
+    *,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    streaming: bool = False,
+) -> ChatOpenAI:
+    """Return a configured LangChain ChatOpenAI per LLM_PROVIDER."""
+    _model = model or _MODEL
+    _max_tokens = max_tokens if max_tokens is not None else _MAX_TOKENS
+    _temp = temperature if temperature is not None else _TEMPERATURE
 
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        assert _API_KEY, "QWEN_API_KEY not set"
-        _client = AsyncOpenAI(api_key=_API_KEY, base_url=_BASE_URL)
-    return _client
+    if _LLM_PROVIDER == "litellm":
+        litellm_url = os.getenv("LITELLM_URL", "http://litellm:4000")
+        master_key = os.getenv("LITELLM_MASTER_KEY", "sk-litellm")
+        return ChatOpenAI(
+            model=_model,
+            api_key=master_key,
+            base_url=litellm_url,
+            max_tokens=_max_tokens,
+            temperature=_temp,
+            streaming=streaming,
+        )
 
-
-async def stream_chat(messages: list[dict]) -> AsyncIterator[str]:
-    stream = await _get_client().chat.completions.create(
-        model=_MODEL,
-        messages=messages,
-        temperature=_TEMPERATURE,
-        stream=True,
+    # openai-compatible (default) — handles DashScope, SiliconFlow, local vLLM, etc.
+    api_base = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    return ChatOpenAI(
+        model=_model,
+        api_key=api_key,
+        base_url=api_base,
+        max_tokens=_max_tokens,
+        temperature=_temp,
+        streaming=streaming,
     )
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta

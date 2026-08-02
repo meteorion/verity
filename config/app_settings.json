@@ -1,0 +1,8 @@
+{
+  "llm_model": "qwen-plus",
+  "retrieval_top_k": 5,
+  "retrieval_top_vector": 50,
+  "rerank_threshold": 0.38,
+  "chunk_size": 600,
+  "chunk_overlap": 80
+}

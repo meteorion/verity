@@ -2,9 +2,12 @@ import Icon from './Icon.jsx'
 
 const NAV_ITEMS = [
   { key: 'knowledge', label: '知识库管理', icon: 'book' },
+  { key: 'chunks', label: 'Chunks 管理', icon: 'layers' },
   { key: 'playground', label: '对话测试/调试', icon: 'chat' },
+  { key: 'evaluation', label: '评估体系', icon: 'target' },
   { key: 'sessions', label: '会话监控', icon: 'activity' },
   { key: 'analytics', label: '数据统计', icon: 'chart' },
+  { key: 'tickets', label: '工单管理', icon: 'inbox' },
   { key: 'config', label: '模型/参数配置', icon: 'sliders' },
   { key: 'users', label: '用户与权限', icon: 'users' }
 ]
@@ -16,7 +19,7 @@ const roleTone = {
   customer: 'bg-slate-500/20 text-slate-300',
 }
 
-export default function Sidebar({ active, onChange, user, onLogout }) {
+export default function Sidebar({ active, onChange, user, onLogout, activePrompt }) {
   return (
     <aside className="w-56 shrink-0 bg-slate-900 text-slate-300 flex flex-col h-screen sticky top-0">
       <div className="px-5 py-5 border-b border-slate-800">
@@ -71,7 +74,13 @@ export default function Sidebar({ active, onChange, user, onLogout }) {
 
       <div className="px-4 py-3 border-t border-slate-800 text-xs text-slate-600">
         <p>环境：P1 · API 模式</p>
-        <p className="mt-0.5">prompt-v3 · claude-sonnet-4-6</p>
+        <p className="mt-0.5">
+          {activePrompt
+            ? <span className="text-indigo-400">prompt-{activePrompt}</span>
+            : <span>prompt-…</span>
+          }
+          {' · claude-sonnet-4-6'}
+        </p>
       </div>
     </aside>
   )

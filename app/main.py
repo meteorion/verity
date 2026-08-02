@@ -7,12 +7,15 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.auth import router as auth_router, require_admin
-from db import close_pool
+from db import close_pool, ensure_schema
 from api.chat import router as chat_router
 from api.debug import router as debug_router
 from api.pipeline import router as pipeline_router
 from api.ops import router as ops_router
 from api.sessions import router as sessions_router
+from api.eval import router as eval_router
+from api.settings import router as settings_router
+from api.tickets import router as tickets_router
 from inference.embedding import load_embedding_model
 from inference.rerank import load_rerank_model
 from inference.nli import load_nli_model
@@ -33,6 +36,7 @@ async def _run_migrations():
     if not dsn:
         return
     try:
+        await ensure_schema()
         conn = await asyncpg.connect(dsn)
         try:
             await conn.execute(
@@ -79,10 +83,22 @@ async def lifespan(app: FastAPI):
     load_rerank_model()
     load_nli_model()
     logger.info("Building LangGraph orchestration graph …")
-    _graph = build_graph()
-    app.state.graph = _graph
-    logger.info("Startup complete — graph ready")
-    yield
+
+    dsn = os.environ.get("PGVECTOR_DSN", "")
+    if dsn:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
+            await checkpointer.setup()
+            _graph = build_graph(checkpointer)
+            app.state.graph = _graph
+            logger.info("Startup complete — graph ready (postgres checkpointer)")
+            yield
+    else:
+        _graph = build_graph()
+        app.state.graph = _graph
+        logger.info("Startup complete — graph ready (in-memory checkpointer)")
+        yield
+
     # Shutdown: release the shared DB pool so connections don't leak on reload.
     await close_pool()
 
@@ -106,6 +122,11 @@ app.include_router(debug_router, dependencies=_admin)
 app.include_router(pipeline_router, dependencies=_admin)
 app.include_router(ops_router, dependencies=_admin)
 app.include_router(sessions_router, dependencies=_admin)
+app.include_router(eval_router, dependencies=_admin)
+app.include_router(settings_router, dependencies=_admin)
+# tickets: POST /api/tickets 和 GET /api/tickets/link 为用户公开端点；
+# 其余管理端点由 api/tickets.py 内部通过 require_admin 依赖保护。
+app.include_router(tickets_router)
 
 
 @app.get("/health")

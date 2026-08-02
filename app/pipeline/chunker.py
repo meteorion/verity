@@ -13,6 +13,17 @@ logger = logging.getLogger(__name__)
 _STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag"))
 _CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "600"))
 _CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "80"))
+
+
+def _get_chunk_params() -> tuple[int, int]:
+    try:
+        from api.settings import load_settings
+        s = load_settings()
+        size = int(s.get("chunk_size") or _CHUNK_SIZE)
+        overlap = int(s.get("chunk_overlap") or _CHUNK_OVERLAP)
+        return size, overlap
+    except Exception:
+        return _CHUNK_SIZE, _CHUNK_OVERLAP
 _HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)", re.MULTILINE)
 
 
@@ -113,6 +124,7 @@ async def chunk_document(
     chunk_acl = list(acl) if acl else ["role:public"]
 
     sections = _parse_sections(markdown)
+    chunk_size, chunk_overlap = _get_chunk_params()
 
     # heading_stack[0] = H1, heading_stack[1] = H2, heading_stack[2] = H3, heading_stack[3] = H4
     heading_stack: list[str] = []
@@ -143,7 +155,7 @@ async def chunk_document(
         if not body:
             continue
 
-        if _token_est(body) <= _CHUNK_SIZE:
+        if _token_est(body) <= chunk_size:
             # Single chunk — content is the body itself (no split)
             chunk_id = f"{doc_id}#{section_idx:03d}_000"
             all_chunks.append(
@@ -171,7 +183,7 @@ async def chunk_document(
             parent_path.write_text(body, encoding="utf-8")
 
             breadcrumb_line = breadcrumb + ":"
-            sub_texts = _split_by_paragraphs(body, breadcrumb_line, _CHUNK_SIZE, _CHUNK_OVERLAP)
+            sub_texts = _split_by_paragraphs(body, breadcrumb_line, chunk_size, chunk_overlap)
 
             first_chunk_id: str | None = None
             for chunk_idx, content in enumerate(sub_texts):

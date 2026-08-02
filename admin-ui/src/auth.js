@@ -31,7 +31,12 @@ export function isLoggedIn() {
 // Fetch wrapper: attaches Bearer token, handles 401 by clearing auth
 export async function apiFetch(url, options = {}) {
   const token = getToken()
-  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
+  const headers = { ...(options.headers || {}) }
+  // Let the browser set the multipart boundary for FormData bodies (file
+  // uploads); only default to JSON for other request bodies.
+  if (!(options.body instanceof FormData) && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json'
+  }
   if (token) headers['Authorization'] = `Bearer ${token}`
   const res = await fetch(url, { ...options, headers })
   if (res.status === 401) {

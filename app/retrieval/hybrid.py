@@ -22,6 +22,18 @@ _TOP_VECTOR = int(os.getenv("RETRIEVAL_TOP_VECTOR", "50"))
 _TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "6"))
 
 
+def _retrieval_cfg() -> tuple[int, int]:
+    try:
+        from api.settings import load_settings
+        s = load_settings()
+        return (
+            int(s.get("retrieval_top_k") or _TOP_K),
+            int(s.get("retrieval_top_vector") or _TOP_VECTOR),
+        )
+    except Exception:
+        return _TOP_K, _TOP_VECTOR
+
+
 def _rrf_merge(rankings: list[list[str]], k: int = 60) -> list[str]:
     scores: dict[str, float] = {}
     for ranking in rankings:
@@ -35,8 +47,12 @@ async def hybrid_retrieve(
     roles: list[str],
     region: str,
     project_group: str | None = None,
-    top_k: int = _TOP_K,
+    top_k: int | None = None,
 ) -> list[dict[str, Any]]:
+    cfg_top_k, cfg_top_vector = _retrieval_cfg()
+    if top_k is None:
+        top_k = cfg_top_k
+
     # embed() is synchronous and blocking (local CPU inference, or a blocking
     # httpx.post in API mode) — offload to a thread so it never stalls the event loop.
     embed_results = await asyncio.to_thread(emb_mod.embed, [query], mode="both")
@@ -46,11 +62,11 @@ async def hybrid_retrieve(
     pool = await _get_pool()
 
     # Dense retrieval is always available
-    dense_rows = await _dense_search(pool, dense_vec, roles, region, _TOP_VECTOR, project_group)
+    dense_rows = await _dense_search(pool, dense_vec, roles, region, cfg_top_vector, project_group)
 
     if sparse_vec and _EMBEDDING_PROVIDER == "local":
         # Sparse retrieval only makes sense with BGE-M3 sparse output
-        sparse_rows = await _sparse_search(pool, sparse_vec, roles, region, _TOP_VECTOR, project_group)
+        sparse_rows = await _sparse_search(pool, sparse_vec, roles, region, cfg_top_vector, project_group)
         dense_ids = [r["chunk_id"] for r in dense_rows]
         sparse_ids = [r["chunk_id"] for r in sparse_rows]
         merged_ids = _rrf_merge([dense_ids, sparse_ids])

@@ -86,6 +86,7 @@ services:
     volumes:
       - ./models:/models:ro
       - ./data:/data
+      - ./config:/config
     depends_on:
       postgres:
         condition: service_healthy
@@ -105,8 +106,10 @@ services:
     #           capabilities: [gpu]
 
   # ---- Layer 3b: Frontends — static SPA built by Vite, served + API-proxied by nginx ----
+  # Use --profile frontend to start these; omit for local Vite dev server instead.
   admin-ui:
     <<: *common
+    profiles: [frontend]
     build: ./admin-ui
     ports:
       - "127.0.0.1:5173:80"
@@ -116,6 +119,7 @@ services:
 
   chat-ui:
     <<: *common
+    profiles: [frontend]
     build: ./chat-ui
     ports:
       - "127.0.0.1:5174:80"

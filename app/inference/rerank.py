@@ -13,6 +13,16 @@ _PROVIDER = os.getenv("RERANK_PROVIDER", "none")
 _LOCAL_PATH = os.getenv("RERANK_MODEL_PATH", "/models/bge-reranker-v2-m3")
 _THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.38"))
 
+
+def _get_rerank_threshold() -> float:
+    try:
+        from api.settings import load_settings
+        s = load_settings()
+        v = s.get("rerank_threshold")
+        return float(v) if v is not None else _THRESHOLD
+    except Exception:
+        return _THRESHOLD
+
 _local_model = None
 
 
@@ -36,7 +46,7 @@ def rerank(query: str, passages: list[str], threshold: float | None = None) -> l
 
 def _rerank_local(query: str, passages: list[str], threshold: float | None) -> list[dict]:
     assert _local_model is not None, "Call load_rerank_model() first"
-    thr = threshold if threshold is not None else _THRESHOLD
+    thr = threshold if threshold is not None else _get_rerank_threshold()
     pairs = [[query, p] for p in passages]
     scores = _local_model.compute_score(pairs, normalize=True)
     results = [
