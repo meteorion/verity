@@ -21,13 +21,38 @@ RUN pip install --no-cache-dir \
     "asyncpg>=0.30" \
     "pgvector>=0.3" \
     "redis[hiredis]>=5.2" \
+    "psycopg[binary]>=3.1" \
+    "langgraph-checkpoint-postgres>=2.0" \
     "pydantic>=2.9" \
     "python-multipart>=0.0.20" \
     "python-jose[cryptography]>=3.3" \
     "pymupdf>=1.24" \
     "python-docx>=1.1" \
     "markdown-it-py>=3.0" \
-    "tiktoken>=0.7"
+    "tiktoken>=0.7" \
+    "ragas>=0.3" \
+    "datasets>=3.0" \
+    "langchain-openai>=0.3" \
+    "langchain-community>=0.3"
+
+# ragas 0.4.x unconditionally imports langchain_community.chat_models.vertexai,
+# which was removed in langchain-community 0.3+. Register a sys.modules stub via
+# sitecustomize.py so any subsequent pip upgrade of langchain-community cannot
+# overwrite it (pip never touches sitecustomize.py).
+RUN python - <<'EOF'
+import os, site
+stub = (
+    "import sys\n"
+    "if 'langchain_community.chat_models.vertexai' not in sys.modules:\n"
+    "    from types import ModuleType as _MT\n"
+    "    _m = _MT('langchain_community.chat_models.vertexai')\n"
+    "    _m.ChatVertexAI = type('ChatVertexAI', (), {})\n"
+    "    sys.modules['langchain_community.chat_models.vertexai'] = _m\n"
+)
+sc = os.path.join(site.getsitepackages()[0], 'sitecustomize.py')
+with open(sc, 'a') as f:
+    f.write(stub)
+EOF
 
 # Optional local-inference layer (FlagEmbedding + transformers + torch CPU)
 # Set --build-arg LOCAL_INFERENCE=1 to enable
