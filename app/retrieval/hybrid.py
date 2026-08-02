@@ -119,7 +119,9 @@ async def _dense_search(
         FROM chunks
         WHERE {acl_clause}
           AND (${region_idx} = ANY(region) OR 'global' = ANY(region))
-          AND (effective_to IS NULL OR effective_to > now())
+          AND (effective_from IS NULL OR effective_from <= now())
+          AND (effective_to   IS NULL OR effective_to   >  now())
+          AND is_parent = FALSE
           {pg_clause}
         ORDER BY embedding <=> $1::vector
         LIMIT ${limit_idx}
@@ -157,7 +159,9 @@ async def _sparse_search(
         FROM chunks
         WHERE {acl_clause}
           AND (${region_idx} = ANY(region) OR 'global' = ANY(region))
-          AND (effective_to IS NULL OR effective_to > now())
+          AND (effective_from IS NULL OR effective_from <= now())
+          AND (effective_to   IS NULL OR effective_to   >  now())
+          AND is_parent = FALSE
           {pg_clause}
         ORDER BY sparse_vector <#> $1::sparsevec
         LIMIT ${limit_idx}

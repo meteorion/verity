@@ -62,14 +62,6 @@ async def ingest(
     embedded = await embed_chunks(chunks)
     result = await index_chunks(embedded)
 
-    if os.environ.get("PGVECTOR_DSN", "") and groups:
-        pool = await get_pool()
-        await pool.executemany(
-            "INSERT INTO document_groups(doc_id, group_id) VALUES($1, $2)"
-            " ON CONFLICT DO NOTHING",
-            [(doc_id, gid) for gid in groups],
-        )
-
     return {
         "doc_id": doc_id,
         "chunk_count": result["chunk_count"],

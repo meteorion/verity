@@ -47,8 +47,9 @@ async def list_documents(status: str = "active", limit: int = 50):
             "       d.admission_score, d.updated_at, d.version, d.source_type,"
             "       d.source_url, d.effective_from, d.effective_to,"
             "       COALESCE(d.acl, '{role:public}') AS acl,"
-            "       COUNT(c.chunk_id) AS chunk_count,"
-            "       ARRAY(SELECT group_id FROM document_groups WHERE doc_id = d.doc_id) AS group_ids"
+            "       COALESCE(d.group_ids, '{global}') AS group_ids,"
+            "       d.doc_type,"
+            "       COUNT(c.chunk_id) FILTER (WHERE c.is_parent = FALSE) AS chunk_count"
             " FROM documents d"
             " LEFT JOIN chunks c ON c.doc_id = d.doc_id"
             "   AND (c.effective_to IS NULL OR c.effective_to > now())"
@@ -78,7 +79,6 @@ async def delete_document(doc_id: str):
     try:
         async with conn.transaction():
             await conn.execute("DELETE FROM chunks WHERE doc_id=$1", doc_id)
-            await conn.execute("DELETE FROM document_groups WHERE doc_id=$1", doc_id)
             await conn.execute("DELETE FROM documents WHERE doc_id=$1", doc_id)
     finally:
         await _release_conn(conn)
@@ -95,17 +95,15 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
     try:
         doc = await conn.fetchrow(
             "SELECT title, owner_email, business_line, source_path,"
-            " version, effective_from, effective_to,"
-            " COALESCE(acl, '{role:public}') AS acl"
+            " version, effective_from, effective_to, doc_type,"
+            " COALESCE(acl, '{role:public}') AS acl,"
+            " COALESCE(group_ids, '{global}') AS group_ids"
             " FROM documents WHERE doc_id=$1",
             doc_id,
         )
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        group_rows = await conn.fetch(
-            "SELECT group_id FROM document_groups WHERE doc_id=$1", doc_id
-        )
-        groups = [r["group_id"] for r in group_rows] or ["global"]
+        groups = list(doc["group_ids"]) or ["global"]
         owner = doc["owner_email"] or ""
         business_line = doc["business_line"] or "default"
         stored_source_path: str | None = doc["source_path"]
@@ -113,6 +111,7 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
         doc_eff_from = doc["effective_from"]
         doc_eff_to = doc["effective_to"]
         doc_acl: list[str] = list(doc["acl"]) if doc["acl"] else ["role:public"]
+        doc_type: str | None = doc["doc_type"]
     finally:
         await _release_conn(conn)
 
@@ -165,6 +164,7 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
         effective_from=doc_eff_from,
         effective_to=doc_eff_to,
         acl=doc_acl,
+        doc_type=doc_type,
     )
     embedded = await embed_chunks(chunks)
     result = await index_chunks(embedded)
@@ -206,6 +206,7 @@ class DocUpdate(BaseModel):
     source_url: str | None = None
     effective_from: str | None = None
     effective_to: str | None = None
+    doc_type: str | None = None
 
 
 @router.put("/documents/{doc_id}")
@@ -269,9 +270,10 @@ async def get_doc_groups(doc_id: str):
     try:
         rows = await conn.fetch(
             "SELECT pg.group_id, pg.name, pg.description"
-            " FROM document_groups dg"
-            " JOIN project_groups pg ON pg.group_id = dg.group_id"
-            " WHERE dg.doc_id = $1",
+            " FROM project_groups pg"
+            " WHERE pg.group_id = ANY("
+            "   SELECT UNNEST(group_ids) FROM documents WHERE doc_id=$1"
+            ")",
             doc_id,
         )
         return {"groups": [dict(r) for r in rows]}
@@ -286,11 +288,9 @@ async def set_doc_groups(doc_id: str, body: GroupAssign):
     conn = await _get_conn()
     try:
         async with conn.transaction():
-            await conn.execute("DELETE FROM document_groups WHERE doc_id=$1", doc_id)
-            await conn.executemany(
-                "INSERT INTO document_groups(doc_id, group_id) VALUES($1, $2)"
-                " ON CONFLICT DO NOTHING",
-                [(doc_id, gid) for gid in groups],
+            await conn.execute(
+                "UPDATE documents SET group_ids=$2, updated_at=now() WHERE doc_id=$1",
+                doc_id, groups,
             )
             await conn.execute(
                 "UPDATE chunks SET product_line=$2 WHERE doc_id=$1",
@@ -641,7 +641,7 @@ async def get_chunk(chunk_id: str):
             " c.title, c.breadcrumb, c.content, c.source_url,"
             " c.acl, c.region, c.product_line, c.version,"
             " c.effective_from, c.effective_to,"
-            " c.parent_chunk_id, c.parent_path, c.updated_at"
+            " c.parent_chunk_id, c.doc_type, c.category, c.tags, c.updated_at"
             " FROM chunks c"
             " JOIN documents d ON d.doc_id = c.doc_id"
             " WHERE c.chunk_id=$1",
@@ -752,10 +752,11 @@ async def create_chunk(doc_id: str, body: ChunkUpsert):
 
     conn = await _get_conn()
     try:
-        group_rows = await conn.fetch(
-            "SELECT group_id FROM document_groups WHERE doc_id=$1", doc_id
+        doc_row = await conn.fetchrow(
+            "SELECT COALESCE(group_ids, '{global}') AS group_ids FROM documents WHERE doc_id=$1",
+            doc_id,
         )
-        product_line = [r["group_id"] for r in group_rows] or ["global"]
+        product_line = list(doc_row["group_ids"]) if doc_row else ["global"]
 
         if embedding is not None:
             await register_vector(conn)
@@ -901,10 +902,11 @@ async def import_chunks_jsonl(
         from pgvector.asyncpg import register_vector
         await register_vector(conn)
 
-        group_rows = await conn.fetch(
-            "SELECT group_id FROM document_groups WHERE doc_id=$1", target_doc_id
+        doc_row = await conn.fetchrow(
+            "SELECT COALESCE(group_ids, '{global}') AS group_ids FROM documents WHERE doc_id=$1",
+            target_doc_id,
         )
-        product_line = [r["group_id"] for r in group_rows] or ["global"]
+        product_line = list(doc_row["group_ids"]) if doc_row else ["global"]
 
         ts = int(_time.time() * 1000)
         contents = [item["content"].strip() for item in items]

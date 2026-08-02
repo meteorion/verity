@@ -1,18 +1,20 @@
-"""Hierarchical chunker: heading-aware split + breadcrumb injection + Small-to-Big parent storage."""
+"""Hierarchical chunker: heading-aware split + breadcrumb injection + parent-child DB storage."""
 import logging
 import os
 import re
-from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
 from db import get_pool
+from pipeline.models import Chunk, Document
 
 logger = logging.getLogger(__name__)
 
-_STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag"))
+_STORAGE_ROOT_ENV = os.getenv("STORAGE_ROOT", "/data/rag")
 _CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "600"))
 _CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "80"))
+
+_HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)", re.MULTILINE)
 
 
 def _get_chunk_params() -> tuple[int, int]:
@@ -24,7 +26,6 @@ def _get_chunk_params() -> tuple[int, int]:
         return size, overlap
     except Exception:
         return _CHUNK_SIZE, _CHUNK_OVERLAP
-_HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)", re.MULTILINE)
 
 
 def _token_est(text: str) -> int:
@@ -38,8 +39,6 @@ def _parse_sections(markdown: str) -> list[tuple[int, str, str]]:
         return [(0, "", markdown.strip())]
 
     sections: list[tuple[int, str, str]] = []
-
-    # Text before first heading
     preamble = markdown[: matches[0].start()].strip()
     if preamble:
         sections.append((0, "", preamble))
@@ -82,10 +81,8 @@ def _split_by_paragraphs(
 
     for para in paragraphs:
         para_tokens = _token_est(para)
-        # If adding this paragraph exceeds the limit and we already have content, flush first
         if current_tokens + para_tokens > chunk_size and current_paras:
             flush()
-            # Overlap: keep last overlap-worth of tokens from previous paragraphs
             overlap_paras: list[str] = []
             overlap_tokens = 0
             for p in reversed(current_paras):
@@ -116,34 +113,27 @@ async def chunk_document(
     effective_from=None,
     effective_to=None,
     acl: list[str] | None = None,
-) -> list[dict[str, Any]]:
+    doc_type: str | None = None,
+    category: str | None = None,
+    tags: list[str] | None = None,
+) -> list[Chunk]:
     markdown: str = parsed.get("markdown", "")
     doc_title: str = parsed.get("metadata", {}).get("title", doc_id)
     updated_at = datetime.now(timezone.utc)
     product_line = list(groups) if groups else ["global"]
     chunk_acl = list(acl) if acl else ["role:public"]
+    chunk_tags = list(tags) if tags else []
 
     sections = _parse_sections(markdown)
     chunk_size, chunk_overlap = _get_chunk_params()
 
-    # heading_stack[0] = H1, heading_stack[1] = H2, heading_stack[2] = H3, heading_stack[3] = H4
     heading_stack: list[str] = []
-    all_chunks: list[dict[str, Any]] = []
-
-    chunk_dir = _STORAGE_ROOT / "chunks" / doc_id
-    chunk_dir.mkdir(parents=True, exist_ok=True)
+    all_chunks: list[Chunk] = []
 
     for section_idx, (level, heading_text, body) in enumerate(sections):
-        # Maintain heading stack
-        if level == 0:
-            # preamble — don't alter stack
-            pass
-        else:
-            # level is 1-based; stack is 0-based list of H1..H4 texts
+        if level > 0:
             stack_idx = level - 1
-            # Trim deeper headings
             heading_stack = heading_stack[:stack_idx]
-            # Pad if needed (shouldn't happen in well-formed docs)
             while len(heading_stack) < stack_idx:
                 heading_stack.append("")
             heading_stack.append(heading_text)
@@ -155,90 +145,92 @@ async def chunk_document(
         if not body:
             continue
 
+        common: dict[str, Any] = dict(
+            doc_id=doc_id,
+            title=section_title,
+            breadcrumb=breadcrumb,
+            source_url=source_url,
+            product_line=product_line,
+            region=["global"],
+            version=version,
+            effective_from=effective_from,
+            effective_to=effective_to,
+            acl=chunk_acl,
+            doc_type=doc_type,
+            category=category,
+            tags=chunk_tags,
+            updated_at=updated_at,
+        )
+
         if _token_est(body) <= chunk_size:
-            # Single chunk — content is the body itself (no split)
-            chunk_id = f"{doc_id}#{section_idx:03d}_000"
-            all_chunks.append(
-                {
-                    "chunk_id": chunk_id,
-                    "doc_id": doc_id,
-                    "parent_chunk_id": parent_chunk_id,
-                    "parent_path": None,
-                    "title": section_title,
-                    "breadcrumb": breadcrumb,
-                    "content": body,
-                    "source_url": source_url,
-                    "product_line": product_line,
-                    "region": ["global"],
-                    "version": version,
-                    "effective_from": effective_from,
-                    "effective_to": effective_to,
-                    "acl": chunk_acl,
-                    "updated_at": updated_at,
-                }
-            )
+            # Small section — single retrieval chunk, no parent row needed.
+            # Prefix with breadcrumb for embedding consistency with sub-chunks.
+            all_chunks.append(Chunk(
+                chunk_id=f"{doc_id}#{section_idx:03d}_000",
+                parent_chunk_id=None,
+                content=f"{breadcrumb}:\n{body}",
+                chunk_index=0,
+                is_parent=False,
+                **common,
+            ))
         else:
-            # Write parent chunk to FS
-            parent_path = chunk_dir / f"{parent_chunk_id}.txt"
-            parent_path.write_text(body, encoding="utf-8")
+            # Large section — write one parent row (full body, no embedding) so
+            # retrieval can expand a matched sub-chunk to its full section context.
+            all_chunks.append(Chunk(
+                chunk_id=parent_chunk_id,
+                parent_chunk_id=None,
+                content=body,
+                chunk_index=-1,
+                is_parent=True,
+                **common,
+            ))
 
             breadcrumb_line = breadcrumb + ":"
             sub_texts = _split_by_paragraphs(body, breadcrumb_line, chunk_size, chunk_overlap)
-
-            first_chunk_id: str | None = None
             for chunk_idx, content in enumerate(sub_texts):
-                chunk_id = f"{doc_id}#{section_idx:03d}_{chunk_idx:03d}"
-                if first_chunk_id is None:
-                    first_chunk_id = chunk_id
-
-                all_chunks.append(
-                    {
-                        "chunk_id": chunk_id,
-                        "doc_id": doc_id,
-                        "parent_chunk_id": parent_chunk_id,
-                        "parent_path": str(parent_path),
-                        "title": section_title,
-                        "breadcrumb": breadcrumb,
-                        "content": content,
-                        "source_url": source_url,
-                        "product_line": product_line,
-                        "region": ["global"],
-                        "version": version,
-                        "effective_from": effective_from,
-                        "effective_to": effective_to,
-                        "acl": chunk_acl,
-                        "updated_at": updated_at,
-                    }
-                )
+                all_chunks.append(Chunk(
+                    chunk_id=f"{doc_id}#{section_idx:03d}_{chunk_idx:03d}",
+                    parent_chunk_id=parent_chunk_id,
+                    content=content,
+                    chunk_index=chunk_idx,
+                    is_parent=False,
+                    **common,
+                ))
 
     logger.info(
-        "Chunked doc_id=%s sections=%d chunks=%d",
+        "Chunked doc_id=%s sections=%d total_chunks=%d (parents=%d)",
         doc_id, len(sections), len(all_chunks),
+        sum(1 for c in all_chunks if c.is_parent),
     )
 
-    # Upsert into documents table
+    # Upsert the document row so downstream indexer can update its status/score.
     if os.environ.get("PGVECTOR_DSN", ""):
         pool = await get_pool()
         await pool.execute(
             """
             INSERT INTO documents(
                 doc_id, title, owner_email, business_line,
-                source_type, source_path,
+                source_type, source_path, source_url,
                 version, effective_from, effective_to,
-                acl, status, updated_at
+                acl, group_ids, doc_type, status, updated_at
             )
-            VALUES($1, $2, $3, $4, 'upload', $5, $6, $7, $8, $9, 'pending', now())
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',now())
             ON CONFLICT (doc_id) DO UPDATE SET
                 updated_at     = now(),
                 status         = 'pending',
                 acl            = EXCLUDED.acl,
+                group_ids      = COALESCE(EXCLUDED.group_ids, documents.group_ids),
                 source_path    = COALESCE(EXCLUDED.source_path, documents.source_path),
+                source_url     = COALESCE(EXCLUDED.source_url, documents.source_url),
                 version        = COALESCE(EXCLUDED.version, documents.version),
                 effective_from = COALESCE(EXCLUDED.effective_from, documents.effective_from),
-                effective_to   = COALESCE(EXCLUDED.effective_to, documents.effective_to)
+                effective_to   = COALESCE(EXCLUDED.effective_to, documents.effective_to),
+                doc_type       = COALESCE(EXCLUDED.doc_type, documents.doc_type)
             """,
             doc_id, doc_title, owner, business_line,
-            source_path, version, effective_from, effective_to, chunk_acl,
+            "upload", source_path, source_url,
+            version, effective_from, effective_to,
+            chunk_acl, product_line, doc_type,
         )
 
     return all_chunks

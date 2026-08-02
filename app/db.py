@@ -15,28 +15,62 @@ _EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))  # 384 = paraphrase-mult
 _SCHEMA_SQL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- Documents: source of truth for all knowledge-base documents.
+-- group_ids replaces the old document_groups junction table.
+CREATE TABLE IF NOT EXISTS documents (
+    doc_id          TEXT PRIMARY KEY,
+    title           TEXT NOT NULL,
+    owner_email     TEXT,
+    business_line   TEXT,
+    source_type     TEXT DEFAULT 'upload',
+    source_path     TEXT,
+    source_url      TEXT DEFAULT '',
+    admission_score INT DEFAULT 100,
+    status          TEXT DEFAULT 'pending',
+    version         TEXT,
+    effective_from  TIMESTAMPTZ,
+    effective_to    TIMESTAMPTZ,
+    acl             TEXT[] DEFAULT '{{role:public}}',
+    group_ids       TEXT[] DEFAULT '{{global}}',
+    doc_type        TEXT,
+    updated_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS project_groups (
+    group_id    TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id        TEXT PRIMARY KEY,
     doc_id          TEXT NOT NULL,
     parent_chunk_id TEXT,
-    parent_path     TEXT,
     title           TEXT,
     breadcrumb      TEXT,
     content         TEXT NOT NULL,
     source_url      TEXT,
-    product_line    TEXT[],
-    region          TEXT[],
+    product_line    TEXT[] DEFAULT '{{}}',
+    region          TEXT[] DEFAULT '{{global}}',
     version         TEXT,
     effective_from  TIMESTAMPTZ,
     effective_to    TIMESTAMPTZ,
-    acl             TEXT[],
+    acl             TEXT[] DEFAULT '{{role:public}}',
+    doc_type        TEXT,
+    category        TEXT,
+    tags            TEXT[] DEFAULT '{{}}',
+    chunk_index     INT DEFAULT 0,
+    is_parent       BOOL DEFAULT FALSE,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    embedding       vector({_EMBEDDING_DIM})
+    embedding       vector({_EMBEDDING_DIM}),
+    sparse_vector   sparsevec(30522)
 );
 
 CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
     ON chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 200);
 CREATE INDEX IF NOT EXISTS chunks_doc_version_idx ON chunks (doc_id, version);
+CREATE INDEX IF NOT EXISTS chunks_is_parent_idx ON chunks (is_parent) WHERE is_parent = FALSE;
 
 -- Evaluation tables
 CREATE TABLE IF NOT EXISTS eval_datasets (
@@ -162,6 +196,41 @@ EXCEPTION WHEN undefined_column THEN NULL;
 END $$;
 
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS group_ids TEXT[] DEFAULT '{{global}}';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_type TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS acl TEXT[] DEFAULT '{{role:public}}';
+
+-- Migrate existing document_groups data into documents.group_ids for installs
+-- that still have the old junction table.
+DO $$
+BEGIN
+    UPDATE documents d
+    SET group_ids = sub.gids
+    FROM (
+        SELECT doc_id, ARRAY_AGG(group_id) AS gids
+        FROM document_groups
+        GROUP BY doc_id
+    ) sub
+    WHERE sub.doc_id = d.doc_id
+      AND (d.group_ids IS NULL OR d.group_ids = '{{global}}');
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS doc_type TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{{}}';
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chunk_index INT DEFAULT 0;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS is_parent BOOL DEFAULT FALSE;
+DO $$
+BEGIN
+    ALTER TABLE chunks ADD COLUMN sparse_vector sparsevec(30522);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$
+BEGIN
+    ALTER TABLE chunks DROP COLUMN parent_path;
+EXCEPTION WHEN undefined_column THEN NULL;
+END $$;
 """
 
 
