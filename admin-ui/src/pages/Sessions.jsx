@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Card, Table, Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
+import { apiFetch } from '../auth.js'
+import { MD_COMPONENTS } from '../components/mdComponents.js'
 
 const INTENT_LABEL = {
   after_sales_refund: '售后退款',
@@ -35,7 +39,7 @@ export default function Sessions() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/v1/sessions?limit=200')
+      const res = await apiFetch('/v1/sessions?limit=200')
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setSessions(data.sessions || [])
@@ -173,7 +177,7 @@ function SessionModal({ sessionId, onClose }) {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    fetch(`/v1/sessions/${encodeURIComponent(sessionId)}`)
+    apiFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
       .then(d => { if (!cancelled) { setData(d); setLoading(false) } })
       .catch(e => { if (!cancelled) { setError(e.message); setLoading(false) } })
@@ -258,7 +262,7 @@ function TurnCard({ turn, isLatest }) {
       <div className="flex justify-start">
         <div className="max-w-[80%] bg-slate-100 text-slate-800 rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm leading-relaxed">
           {turn.answer
-            ? <TurnAnswer answer={turn.answer} chunks={turn.chunks || []} isLatest={isLatest} />
+            ? <TurnAnswer answer={turn.answer} />
             : <span className="italic text-slate-400">（无回复）</span>}
         </div>
       </div>
@@ -301,29 +305,13 @@ function TurnCard({ turn, isLatest }) {
   )
 }
 
-function TurnAnswer({ answer, chunks, isLatest }) {
-  if (!isLatest) {
-    return <span className="whitespace-pre-wrap">{answer}</span>
-  }
-  const parts = answer.split(/(\[\d+\])/g)
+function TurnAnswer({ answer }) {
   return (
-    <span>
-      {parts.map((part, i) => {
-        const m = part.match(/^\[(\d+)\]$/)
-        if (m) {
-          const idx = parseInt(m[1])
-          const chunk = chunks[idx - 1]
-          const tip = chunk ? (chunk.breadcrumb || chunk.title || `来源 ${idx}`) : `来源 ${idx}`
-          return (
-            <sup key={i} title={tip}
-              className="inline-flex items-center justify-center w-[1.1rem] h-[1.1rem] text-[10px] font-semibold rounded-full bg-indigo-100 text-indigo-600 cursor-default select-none mx-0.5 align-middle">
-              {idx}
-            </sup>
-          )
-        }
-        return <span key={i} className="whitespace-pre-wrap">{part}</span>
-      })}
-    </span>
+    <div className="text-sm text-slate-800">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+        {answer}
+      </ReactMarkdown>
+    </div>
   )
 }
 

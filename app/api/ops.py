@@ -907,36 +907,45 @@ async def import_chunks_jsonl(
         product_line = [r["group_id"] for r in group_rows] or ["global"]
 
         ts = int(_time.time() * 1000)
-        for i, item in enumerate(items):
-            chunk_id = f"{target_doc_id}#import_{ts}_{i:04d}"
-            content = item["content"].strip()
-            embedding = None
-            try:
-                vecs = embed([content])
-                embedding = vecs[0].dense
-            except Exception:
-                pass
+        contents = [item["content"].strip() for item in items]
+        chunk_ids = [f"{target_doc_id}#import_{ts}_{i:04d}" for i in range(len(items))]
 
-            if embedding is not None:
-                await conn.execute(
-                    "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
-                    " version, product_line, embedding, updated_at)"
-                    " VALUES($1, $2, $3, $4, $5, $6, $7, $8, now())",
-                    chunk_id, target_doc_id,
-                    item.get("title", ""), item.get("breadcrumb", ""),
-                    content, item.get("version"),
-                    product_line, embedding,
-                )
+        embeddings: list = [None] * len(items)
+        try:
+            vecs = embed(contents)
+            for i, v in enumerate(vecs):
+                embeddings[i] = v.dense
+        except Exception:
+            pass
+
+        with_emb = []
+        without_emb = []
+        for i, item in enumerate(items):
+            row = (
+                chunk_ids[i], target_doc_id,
+                item.get("title", ""), item.get("breadcrumb", ""),
+                contents[i], item.get("version"),
+                product_line,
+            )
+            if embeddings[i] is not None:
+                with_emb.append((*row, embeddings[i]))
             else:
-                await conn.execute(
-                    "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
-                    " version, product_line, updated_at)"
-                    " VALUES($1, $2, $3, $4, $5, $6, $7, now())",
-                    chunk_id, target_doc_id,
-                    item.get("title", ""), item.get("breadcrumb", ""),
-                    content, item.get("version"),
-                    product_line,
-                )
+                without_emb.append(row)
+
+        if with_emb:
+            await conn.executemany(
+                "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
+                " version, product_line, embedding, updated_at)"
+                " VALUES($1, $2, $3, $4, $5, $6, $7, $8, now())",
+                with_emb,
+            )
+        if without_emb:
+            await conn.executemany(
+                "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
+                " version, product_line, updated_at)"
+                " VALUES($1, $2, $3, $4, $5, $6, $7, now())",
+                without_emb,
+            )
 
         return {
             "doc_id": target_doc_id,
