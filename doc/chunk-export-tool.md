@@ -22,7 +22,17 @@ Content-Type: multipart/form-data
 | `chunk_size` | int | settings | 覆盖全局 chunk_size |
 | `chunk_overlap` | int | settings | 覆盖全局 chunk_overlap |
 | `use_llm_structure` | bool | `true` | 是否调用 LLM 提取文档结构 |
-| `doc_type` | string | `null` | 文档类型标注（FAQ / 操作手册 / 政策说明） |
+| `doc_id` | string | 文件名 | 文档唯一标识，不填则由文件名生成 |
+| `doc_type` | string | `null` | FAQ / 操作手册 / 政策说明 / 合同模板 |
+| `category` | string | `null` | 业务分类，如 退款 / 发货 / 会员 |
+| `source_url` | string | `null` | 原始文档链接，写入 chunk.source_url |
+| `product_line` | string | `global` | 逗号分隔，如 `product_a,product_b` |
+| `region` | string | `global` | 逗号分隔，如 `cn,hk` |
+| `acl` | string | `role:public` | 逗号分隔，如 `role:agent,role:public` |
+| `version` | string | `null` | 文档版本号 |
+| `effective_from` | string | `null` | ISO8601 生效开始时间 |
+| `effective_to` | string | `null` | ISO8601 生效结束时间 |
+| `tags` | string | `null` | 逗号分隔自由标签 |
 
 ### 响应
 
@@ -88,27 +98,69 @@ Content-Type: multipart/form-data
 
 ## 输出格式
 
-### JSON
+字段对应 `pipeline/models.py` 的 `Chunk` 数据类，去掉向量字段（`embedding` / `sparse_vector`）后全量输出。
+
+### 字段说明
+
+| 字段 | 类型 | 来源 | 说明 |
+|------|------|------|------|
+| `chunk_id` | string | chunker 生成 | `{doc_id}-{chunk_index}` |
+| `doc_id` | string | 请求参数 / 文件名 | 文档唯一标识 |
+| `chunk_index` | int | chunker | 在文档中的顺序（0-based） |
+| `title` | string | chunker / LLM | 所属节标题 |
+| `breadcrumb` | string | chunker | 完整路径，如 `售后 > 退款 > 申请条件` |
+| `content` | string | chunker | 正文内容 |
+| `tokens_est` | int | `len(content)//3` | 估算 token 数 |
+| `is_parent` | bool | chunker | 父节点（长节的摘要 chunk） |
+| `parent_chunk_id` | string\|null | chunker | 子 chunk 指向的父 chunk_id |
+| `source_url` | string\|null | 请求参数 | 原始文档链接 |
+| `doc_type` | string\|null | LLM front-matter / 请求参数 | FAQ / 操作手册 / 政策说明 / 合同模板 |
+| `category` | string\|null | 请求参数 | 业务分类，如 退款 / 发货 / 会员 |
+| `product_line` | string[] | 请求参数 | 适用产品线，默认 `["global"]` |
+| `region` | string[] | 请求参数 | 适用区域，默认 `["global"]` |
+| `acl` | string[] | 请求参数 | 访问权限，默认 `["role:public"]` |
+| `version` | string\|null | 请求参数 | 文档版本号 |
+| `effective_from` | string\|null | 请求参数 | ISO8601，生效开始时间 |
+| `effective_to` | string\|null | 请求参数 | ISO8601，生效结束时间 |
+| `tags` | string[] | 请求参数 | 自由标签，如 `["高优","外部"]` |
+| `updated_at` | string | 导出时刻 | ISO8601 |
+
+### JSON 示例
 
 ```json
 [
   {
+    "chunk_id": "doc-20260803-001-0",
+    "doc_id": "doc-20260803-001",
     "chunk_index": 0,
     "title": "退款政策",
     "breadcrumb": "售后服务 > 退款政策",
-    "content": "...",
+    "content": "自购买之日起 7 天内可无理由退款……",
     "tokens_est": 180,
     "is_parent": false,
-    "parent_chunk_id": null
+    "parent_chunk_id": null,
+    "source_url": "https://docs.company.com/after-sales",
+    "doc_type": "政策说明",
+    "category": "退款",
+    "product_line": ["global"],
+    "region": ["global"],
+    "acl": ["role:public"],
+    "version": "2026-Q3",
+    "effective_from": "2026-07-01T00:00:00Z",
+    "effective_to": null,
+    "tags": ["售后", "退款"],
+    "updated_at": "2026-08-03T10:00:00Z"
   }
 ]
 ```
 
 ### CSV
 
+CSV 将数组字段（`product_line` / `region` / `acl` / `tags`）序列化为分号分隔字符串。
+
 ```
-chunk_index,title,breadcrumb,content,tokens_est,is_parent
-0,退款政策,"售后服务 > 退款政策","...",180,false
+chunk_id,doc_id,chunk_index,title,breadcrumb,content,tokens_est,is_parent,parent_chunk_id,source_url,doc_type,category,product_line,region,acl,version,effective_from,effective_to,tags,updated_at
+doc-20260803-001-0,doc-20260803-001,0,退款政策,"售后服务 > 退款政策","自购买之日起…",180,false,,https://docs.company.com/after-sales,政策说明,退款,global,global,role:public,2026-Q3,2026-07-01T00:00:00Z,,售后;退款,2026-08-03T10:00:00Z
 ```
 
 ---
