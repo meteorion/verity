@@ -25,14 +25,30 @@ Content-Type: multipart/form-data
 | `doc_id` | string | 文件名 | 文档唯一标识，不填则由文件名生成 |
 | `doc_type` | string | `null` | FAQ / 操作手册 / 政策说明 / 合同模板 |
 | `category` | string | `null` | 业务分类，如 退款 / 发货 / 会员 |
-| `source_url` | string | `null` | 原始文档链接，写入 chunk.source_url |
+| `source_url` | string | — | 见下方字段默认值策略 |
 | `product_line` | string | `global` | 逗号分隔，如 `product_a,product_b` |
 | `region` | string | `global` | 逗号分隔，如 `cn,hk` |
 | `acl` | string | `role:public` | 逗号分隔，如 `role:agent,role:public` |
-| `version` | string | `null` | 文档版本号 |
-| `effective_from` | string | `null` | ISO8601 生效开始时间 |
-| `effective_to` | string | `null` | ISO8601 生效结束时间 |
+| `version` | string | `v1.0` | 文档版本号 |
+| `effective_from` | string | `null` | ISO8601 生效开始时间，不填不设置 |
+| `effective_to` | string | `null` | ISO8601 生效结束时间，不填不设置 |
 | `tags` | string | `null` | 逗号分隔自由标签 |
+
+### 字段默认值策略
+
+```
+source_url:
+  1. 用户在导入时填写  → 直接使用
+  2. 未填写            → LLM 从文档内容提取（识别封面页、页眉页脚中的 URL）
+  3. LLM 无法提取      → 不设置（null）
+
+product_line:  用户填写 → 默认 ["global"]
+region:        用户填写 → 默认 ["global"]
+acl:           用户填写 → 默认 ["role:public"]
+version:       用户填写 → 默认 "v1.0"
+effective_from: 用户填写 → 不设置（null）
+effective_to:   用户填写 → 不设置（null）
+```
 
 ### 响应
 
@@ -86,6 +102,7 @@ Content-Type: multipart/form-data
    title: <文档标题>
    doc_type: <FAQ|操作手册|政策说明|合同模板|其他>
    summary: <50字以内摘要>
+   source_url: <从封面页/页眉页脚/文档内容中识别到的原始 URL，识别不到则留空>
    ---
 
 原始文档：
