@@ -592,9 +592,9 @@ services:
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
     env_file: .env
-    volumes: ["./config/litellm.yaml:/app/config/litellm.yaml:ro"]
+    volumes: ["./config.txt/litellm.yaml:/app/config.txt/litellm.yaml:ro"]
     ports: ["127.0.0.1:4000:4000"]
-    command: ["--config", "/app/config/litellm.yaml", "--port", "4000"]
+    command: ["--config.txt", "/app/config.txt/litellm.yaml", "--port", "4000"]
     depends_on: [postgres]
     restart: unless-stopped
 
@@ -626,8 +626,8 @@ services:
     image: nginx:1.27-alpine
     ports: ["80:80", "443:443"]
     volumes:
-      - ./config/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./config/certs:/etc/nginx/certs:ro
+      - ./config.txt/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./config.txt/certs:/etc/nginx/certs:ro
     depends_on: [app]
     restart: unless-stopped
 ```

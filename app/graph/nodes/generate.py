@@ -137,8 +137,9 @@ async def generate_node(state: OrchestratorState) -> dict:
     if vec and chunks and answer:
         from graph.nodes.rewrite import write_cache
         query_for_cache = state.get("query_rewritten") or state["query_raw"]
-        chunk_ids = [c.get("chunk_id", "") for c in chunks]
-        asyncio.create_task(write_cache(query_for_cache, vec, answer, chunk_ids))
+        _ref_keys = ("chunk_id", "title", "breadcrumb", "source_url", "doc_id")
+        cache_refs = [{k: c.get(k, "") for k in _ref_keys} for c in chunks]
+        asyncio.create_task(write_cache(query_for_cache, vec, answer, cache_refs))
 
     return {"answer_stream": answer, "nli_flags": []}
 

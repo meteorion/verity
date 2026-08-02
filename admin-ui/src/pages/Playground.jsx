@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { Card, Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
 import { apiFetch } from '../auth.js'
-import { MD_COMPONENTS } from '../components/mdComponents.js'
+import { MD_COMPONENTS } from '../components/mdComponents.jsx'
 
 // 调试台：
 //   "运行测试"  → POST /v1/chat  SSE 流式，展示首字延迟
@@ -31,6 +31,7 @@ export default function Playground() {
   const [refs, setRefs] = useState([])
   const [firstTokenMs, setFirstTokenMs] = useState(null)
   const [totalMs, setTotalMs] = useState(null)
+  const [streamMeta, setStreamMeta] = useState(null)  // {cache_hit, faq_hit, intent}
   const [streamError, setStreamError] = useState(null)
   const [sessionId, setSessionId] = useState(() => `play_${Date.now()}`)
   const abortRef = useRef(null)
@@ -46,6 +47,7 @@ export default function Playground() {
     setRefs([])
     setFirstTokenMs(null)
     setTotalMs(null)
+    setStreamMeta(null)
     setStreamError(null)
     setDebugResult(null)
     setDebugError(null)
@@ -60,6 +62,7 @@ export default function Playground() {
     setRefs([])
     setFirstTokenMs(null)
     setTotalMs(null)
+    setStreamMeta(null)
     setStreamError(null)
     setDebugResult(null)
 
@@ -102,6 +105,10 @@ export default function Playground() {
             try { setRefs(JSON.parse(payload.slice(6))) } catch {}
             continue
           }
+          if (payload.startsWith('[META]')) {
+            try { setStreamMeta(JSON.parse(payload.slice(6))) } catch {}
+            continue
+          }
           if (firstToken) { setFirstTokenMs(Math.round(performance.now() - t0)); firstToken = false }
           try { setAnswer((p) => p + JSON.parse(payload)) } catch { setAnswer((p) => p + payload) }
         }
@@ -125,6 +132,7 @@ export default function Playground() {
     setDebugError(null)
     setFirstTokenMs(null)
     setTotalMs(null)
+    setStreamMeta(null)
 
     try {
       const res = await apiFetch('/v1/debug', {
@@ -233,6 +241,7 @@ export default function Playground() {
             <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap gap-2 text-xs text-slate-500">
               <span>意图：<span className="font-medium text-slate-700">{debugResult.intent ?? '—'}</span></span>
               {debugResult.faq_hit && <Badge tone="green">FAQ 命中</Badge>}
+              {debugResult.cache_hit && <Badge tone="blue">语义缓存命中</Badge>}
               <span>总耗时：<span className="font-medium text-slate-700">{debugResult.total_ms} ms</span></span>
             </div>
           )}
@@ -272,14 +281,29 @@ export default function Playground() {
 
       {/* ── Right: latency + trace ── */}
       <div className="space-y-5">
-        <Card title="延迟">
+        <Card title="延迟 & 指标">
           <div className="space-y-3 text-sm">
             <Metric label="首字延迟"
               value={firstTokenMs != null ? `${firstTokenMs} ms` : '—'}
               tone={firstTokenMs != null ? (firstTokenMs > 2000 ? 'amber' : 'green') : 'slate'} />
             <Metric label="总耗时"
               value={totalMs != null ? `${(totalMs / 1000).toFixed(2)} s` : '—'}
-              tone={totalMs != null ? 'slate' : 'slate'} />
+              tone="slate" />
+            {(streamMeta || debugResult) && <>
+              <div className="pt-2 border-t border-slate-100 space-y-2">
+                <Metric label="语义缓存"
+                  value={(streamMeta ?? debugResult).cache_hit ? '命中' : '未命中'}
+                  tone={(streamMeta ?? debugResult).cache_hit ? 'green' : 'slate'} />
+                <Metric label="FAQ 命中"
+                  value={(streamMeta ?? debugResult).faq_hit ? '命中' : '未命中'}
+                  tone={(streamMeta ?? debugResult).faq_hit ? 'green' : 'slate'} />
+                {(streamMeta ?? debugResult).intent && (
+                  <Metric label="识别意图"
+                    value={(streamMeta ?? debugResult).intent}
+                    tone="slate" />
+                )}
+              </div>
+            </>}
             <div className="pt-2 border-t border-slate-100">
               <div className="flex items-center justify-between mb-0.5">
                 <p className="text-xs text-slate-400">Session ID</p>

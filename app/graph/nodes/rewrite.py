@@ -134,7 +134,7 @@ async def _check_cache(vec: list[float]) -> dict | None:
     return None
 
 
-async def write_cache(query: str, vec: list[float], answer: str, chunk_ids: list[str]) -> None:
+async def write_cache(query: str, vec: list[float], answer: str, refs: list[dict]) -> None:
     """Write a cache entry; called fire-and-forget from generate_node."""
     if not answer:
         return
@@ -142,7 +142,7 @@ async def write_cache(query: str, vec: list[float], answer: str, chunk_ids: list
         import redis.asyncio as aioredis
         key = f"semantic_cache:{hashlib.sha256(query.encode()).hexdigest()[:16]}"
         payload = json.dumps(
-            {"query": query, "embedding": vec, "answer": answer, "chunk_ids": chunk_ids},
+            {"query": query, "embedding": vec, "answer": answer, "refs": refs},
             ensure_ascii=False,
         )
         rc = aioredis.from_url(_REDIS_URL, decode_responses=True)
@@ -204,11 +204,15 @@ async def rewrite_node(state: OrchestratorState) -> dict:
     # 1. Semantic cache
     cached = await _check_cache(vec)
     if cached:
+        # Restore refs so chat.py can emit [REFS] for citation markers in the answer.
+        # Old cache entries have "chunk_ids" (list[str]); new entries have "refs" (list[dict]).
+        cached_refs = cached.get("refs") or []
         return {
             "query_rewritten": query,
             "query_embedding": vec,
             "cache_hit": True,
             "answer_stream": cached["answer"],
+            "retrieved_chunks": cached_refs,
             "multi_queries": None,
         }
 

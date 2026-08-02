@@ -104,6 +104,7 @@ async def debug_chat(req: DebugRequest, request: Request):
 
     answer = accumulated.get("answer_stream") or ""
 
+    total_ms = round((time.perf_counter() - t0) * 1000)
     try:
         record_turn(
             session_id=req.session_id,
@@ -118,6 +119,8 @@ async def debug_chat(req: DebugRequest, request: Request):
             transferred=bool(accumulated.get("transferred")),
             transfer_reason=accumulated.get("transfer_reason"),
             first_token_ms=None,
+            total_ms=total_ms,
+            cache_hit=bool(accumulated.get("cache_hit")),
         )
     except Exception:
         pass
@@ -126,8 +129,9 @@ async def debug_chat(req: DebugRequest, request: Request):
         "answer": answer,
         "intent": accumulated.get("intent"),
         "faq_hit": bool(accumulated.get("faq_hit")),
+        "cache_hit": bool(accumulated.get("cache_hit")),
         "chunks": chunks,
         "refs": refs,
         "spans": spans,
-        "total_ms": round((time.perf_counter() - t0) * 1000),
+        "total_ms": total_ms,
     }

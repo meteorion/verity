@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 
 from fastapi import APIRouter, Request
@@ -116,10 +117,21 @@ async def chat(req: ChatRequest, request: Request):
             answer_tokens.append(fallback)
             yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
 
+        total_ms = round((time.perf_counter() - t0) * 1000)
         yield "data: [DONE]\n\n"
-        if last_chunks:
+        answer_text = "".join(answer_tokens)
+        if last_chunks and re.search(r'\[\d+\]', answer_text):
             refs = build_refs(last_chunks)
             yield f"data: [REFS]{json.dumps(refs, ensure_ascii=False)}\n\n"
+
+        meta = {
+            "cache_hit": bool(last_state.get("cache_hit")),
+            "faq_hit": bool(last_state.get("faq_hit")),
+            "intent": last_state.get("intent"),
+            "total_ms": total_ms,
+            "first_token_ms": first_token_ms,
+        }
+        yield f"data: [META]{json.dumps(meta, ensure_ascii=False)}\n\n"
 
         try:
             record_turn(
@@ -135,6 +147,8 @@ async def chat(req: ChatRequest, request: Request):
                 transferred=bool(last_state.get("transferred")),
                 transfer_reason=last_state.get("transfer_reason"),
                 first_token_ms=first_token_ms,
+                total_ms=total_ms,
+                cache_hit=bool(last_state.get("cache_hit")),
             )
         except Exception:
             logger.exception("record_turn failed for session %s", req.session_id)

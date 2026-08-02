@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { Card, Table, Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
 import { apiFetch } from '../auth.js'
-import { MD_COMPONENTS } from '../components/mdComponents.js'
+import { MD_COMPONENTS } from '../components/mdComponents.jsx'
 
 const INTENT_LABEL = {
   after_sales_refund: '售后退款',
@@ -246,9 +246,19 @@ function TurnCard({ turn, isLatest }) {
         <span className="font-medium text-slate-500">第 {turn.turn_id} 轮</span>
         {turn.intent && <Badge tone="blue">{intentLabel(turn.intent)}</Badge>}
         {turn.faq_hit && <Badge tone="green">FAQ 命中</Badge>}
+        {turn.cache_hit && <Badge tone="blue">缓存</Badge>}
         {turn.transferred && <Badge tone="purple">转人工</Badge>}
-        {turn.first_token_ms && <span className="ml-auto">{turn.first_token_ms}ms</span>}
-        <span className={turn.first_token_ms ? '' : 'ml-auto'}>{fmtTime(turn.created_at)}</span>
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          {turn.first_token_ms != null && (
+            <span title="首字延迟">{turn.first_token_ms}ms↑</span>
+          )}
+          {turn.total_ms != null && (
+            <span title="总耗时" className={turn.first_token_ms != null ? 'text-slate-300' : ''}>
+              {(turn.total_ms / 1000).toFixed(2)}s
+            </span>
+          )}
+          <span>{fmtTime(turn.created_at)}</span>
+        </div>
       </div>
 
       {/* User bubble */}

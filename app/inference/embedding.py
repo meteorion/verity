@@ -22,7 +22,7 @@ _PROVIDER = os.getenv("EMBEDDING_PROVIDER", "api")
 _local_model = None
 _LOCAL_PATH = os.getenv("EMBEDDING_MODEL_PATH", "/models/bge-m3")
 
-# ---------- API provider config ----------
+# ---------- API provider config.txt ----------
 _API_BASE = os.getenv("EMBEDDING_API_BASE", "https://api.openai.com/v1")
 _API_KEY = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 _API_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")

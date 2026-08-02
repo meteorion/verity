@@ -3,7 +3,29 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
+import QuestionsPanel from '../components/QuestionsPanel.jsx'
 import { apiFetch } from '../auth.js'
+
+const DOC_TYPE_OPTIONS = [
+  { value: '', label: '—— 不限 ——' },
+  { value: 'faq', label: 'FAQ' },
+  { value: 'manual', label: '操作手册' },
+  { value: 'policy', label: '政策说明' },
+  { value: 'announcement', label: '公告' },
+  { value: 'other', label: '其他' },
+]
+const CATEGORY_OPTIONS = [
+  { value: '', label: '—— 不限 ——' },
+  { value: 'product', label: '产品' },
+  { value: 'after_sales', label: '售后' },
+  { value: 'complaint', label: '投诉' },
+  { value: 'inquiry', label: '咨询' },
+  { value: 'general', label: '通用' },
+]
+const TAG_PRESETS = ['高优', '紧急', '外部', '常见问题', 'VIP', '退款', '发货', '会员']
+
+const DOC_TYPE_LABEL = { faq: 'FAQ', manual: '操作手册', policy: '政策说明', announcement: '公告', other: '其他' }
+const CATEGORY_LABEL = { product: '产品', after_sales: '售后', complaint: '投诉', inquiry: '咨询', general: '通用' }
 
 function fmtDate(iso) {
   if (!iso) return '-'
@@ -76,7 +98,7 @@ export default function Chunks() {
   async function deleteChunk(chunk_id) {
     if (!confirm('确认删除该知识块？此操作不可恢复。')) return
     try {
-      const res = await apiFetch(`/api/ops/chunks/${chunk_id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/ops/chunks/${encodeURIComponent(chunk_id)}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(await res.text())
       if (viewingChunk?.chunk_id === chunk_id) setViewingChunk(null)
       loadChunks()
@@ -90,7 +112,7 @@ export default function Chunks() {
     const isNew = !chunk_id
     const url = isNew
       ? `/api/ops/documents/${doc_id}/chunks`
-      : `/api/ops/chunks/${chunk_id}`
+      : `/api/ops/chunks/${encodeURIComponent(chunk_id)}`
     const res = await apiFetch(url, {
       method: isNew ? 'POST' : 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -373,136 +395,7 @@ function TagList({ label, items }) {
   )
 }
 
-// ── Questions Panel (多问法) ───────────────────────────────────────────────
 
-function QuestionsPanel({ chunkId }) {
-  const [questions, setQuestions] = useState(null)   // null = loading
-  const [generating, setGenerating] = useState(false)
-  const [editingId, setEditingId] = useState(null)
-  const [editText, setEditText] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState(null)
-
-  const load = useCallback(async () => {
-    try {
-      const res = await apiFetch(`/api/ops/chunks/${chunkId}/questions`)
-      if (res.ok) setQuestions((await res.json()).questions ?? [])
-    } catch { /* ignore */ }
-  }, [chunkId])
-
-  useEffect(() => { load() }, [load])
-
-  async function generate() {
-    setGenerating(true)
-    setError(null)
-    try {
-      const res = await apiFetch(`/api/ops/chunks/${chunkId}/questions/generate`, { method: 'POST' })
-      if (!res.ok) throw new Error(await res.text())
-      await load()
-    } catch (e) { setError(e.message) }
-    finally { setGenerating(false) }
-  }
-
-  async function saveEdit(q) {
-    if (!editText.trim()) return
-    setSaving(true)
-    try {
-      const res = await apiFetch(`/api/ops/chunks/${chunkId}/questions/${q.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: editText }),
-      })
-      if (!res.ok) throw new Error(await res.text())
-      setEditingId(null)
-      await load()
-    } catch (e) { setError(e.message) }
-    finally { setSaving(false) }
-  }
-
-  async function deleteQ(q) {
-    await apiFetch(`/api/ops/chunks/${chunkId}/questions/${q.id}`, { method: 'DELETE' })
-    await load()
-  }
-
-  return (
-    <section>
-      <div className="flex items-center justify-between mb-2">
-        <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-          多问法扩充
-          {questions && <span className="ml-1.5 font-normal normal-case text-slate-300">({questions.length})</span>}
-        </p>
-        <button
-          onClick={generate}
-          disabled={generating}
-          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 disabled:opacity-40 transition-colors"
-        >
-          <Icon name="refresh-cw" size={11} className={generating ? 'animate-spin' : ''} />
-          {generating ? '生成中…' : '生成问法'}
-        </button>
-      </div>
-
-      {error && <p className="text-[11px] text-red-500 mb-2">{error}</p>}
-
-      {questions === null && (
-        <p className="text-xs text-slate-300">加载中…</p>
-      )}
-      {questions !== null && questions.length === 0 && (
-        <p className="text-xs text-slate-300">暂无问法，点击"生成问法"让 AI 生成</p>
-      )}
-
-      <div className="space-y-1.5">
-        {(questions ?? []).map((q) => (
-          <div key={q.id} className="group flex items-start gap-2 rounded-lg px-2 py-1.5 bg-slate-50 hover:bg-indigo-50/40 transition-colors">
-            {editingId === q.id ? (
-              <div className="flex-1 flex gap-1.5">
-                <input
-                  autoFocus
-                  value={editText}
-                  onChange={(e) => setEditText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') saveEdit(q); if (e.key === 'Escape') setEditingId(null) }}
-                  className="flex-1 text-xs border border-indigo-300 rounded px-1.5 py-0.5 outline-none"
-                />
-                <button
-                  onClick={() => saveEdit(q)}
-                  disabled={saving}
-                  className="text-[11px] px-2 py-0.5 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40"
-                >
-                  保存
-                </button>
-                <button
-                  onClick={() => setEditingId(null)}
-                  className="text-[11px] px-1.5 py-0.5 rounded text-slate-400 hover:text-slate-600"
-                >
-                  取消
-                </button>
-              </div>
-            ) : (
-              <>
-                <span className="flex-1 text-xs text-slate-700 leading-relaxed pt-0.5">{q.question}</span>
-                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                  <button
-                    onClick={() => { setEditingId(q.id); setEditText(q.question) }}
-                    className="text-slate-400 hover:text-indigo-500"
-                    title="编辑"
-                  >
-                    <Icon name="edit" size={12} />
-                  </button>
-                  <button
-                    onClick={() => deleteQ(q)}
-                    className="text-slate-400 hover:text-red-500"
-                    title="删除"
-                  >
-                    <Icon name="trash" size={12} />
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        ))}
-      </div>
-    </section>
-  )
-}
 
 function ChunkDetailDrawer({ chunk, onClose, onEdit, onDelete }) {
   return (
@@ -534,7 +427,7 @@ function ChunkDetailDrawer({ chunk, onClose, onEdit, onDelete }) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+        <div className="flex-1 overflow-y-auto px-5 pt-5 pb-12 space-y-5">
           {/* Basic info */}
           <section>
             <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2">基本信息</p>
@@ -545,6 +438,14 @@ function ChunkDetailDrawer({ chunk, onClose, onEdit, onDelete }) {
               <MetaRow label="路径" value={chunk.breadcrumb} />
               <MetaRow label="版本" value={chunk.version} />
               <MetaRow label="更新时间" value={fmtDate(chunk.updated_at)} />
+              {(chunk.chunk_size != null || chunk.chunk_overlap != null) && (
+                <MetaRow label="切分参数" value={`${chunk.chunk_size ?? 600} / ${chunk.chunk_overlap ?? 80} tokens`} />
+              )}
+              {chunk.doc_type && <MetaRow label="文档类型" value={DOC_TYPE_LABEL[chunk.doc_type] || chunk.doc_type} />}
+              {chunk.category && <MetaRow label="分类" value={CATEGORY_LABEL[chunk.category] || chunk.category} />}
+              {chunk.tags?.length > 0 && (
+                <TagList label="标签" items={chunk.tags} />
+              )}
             </div>
           </section>
 
@@ -653,6 +554,23 @@ function TextInput({ value, onChange, placeholder, mono }) {
   )
 }
 
+function TagPills({ selected, options, onChange }) {
+  function toggle(t) {
+    onChange(selected.includes(t) ? selected.filter(x => x !== t) : [...selected, t])
+  }
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap mt-1">
+      {options.map(t => (
+        <button key={t} type="button" onClick={() => toggle(t)}
+          className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
+            selected.includes(t) ? 'bg-indigo-600 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
+          }`}
+        >{t}</button>
+      ))}
+    </div>
+  )
+}
+
 function ChunkEditModal({ chunk, documents, defaultDocId, onClose, onSave }) {
   const isNew = !chunk?.chunk_id
   const [docId, setDocId] = useState(chunk?.doc_id ?? defaultDocId ?? documents[0]?.doc_id ?? '')
@@ -666,6 +584,9 @@ function ChunkEditModal({ chunk, documents, defaultDocId, onClose, onSave }) {
   const [regionStr, setRegionStr] = useState((chunk?.region ?? []).join(', '))
   const [effectiveFrom, setEffectiveFrom] = useState(fmtDateInput(chunk?.effective_from))
   const [effectiveTo, setEffectiveTo] = useState(fmtDateInput(chunk?.effective_to))
+  const [docType, setDocType] = useState(chunk?.doc_type ?? '')
+  const [category, setCategory] = useState(chunk?.category ?? '')
+  const [tags, setTags] = useState(chunk?.tags ?? [])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
 
@@ -693,6 +614,9 @@ function ChunkEditModal({ chunk, documents, defaultDocId, onClose, onSave }) {
         region: parseArr(regionStr).length ? parseArr(regionStr) : null,
         effective_from: effectiveFrom || null,
         effective_to: effectiveTo || null,
+        doc_type: docType || null,
+        category: category || null,
+        tags: tags.length ? tags : null,
       })
     } catch (e) {
       setError(e.message)
@@ -755,6 +679,24 @@ function ChunkEditModal({ chunk, documents, defaultDocId, onClose, onSave }) {
             <TextInput value={sourceUrl} onChange={setSourceUrl} placeholder="https://..." mono />
           </div>
 
+          {/* Row 3b: doc_type + category */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <FieldLabel>文档类型</FieldLabel>
+              <Select value={docType} onChange={setDocType} options={DOC_TYPE_OPTIONS} className="w-full mt-1" size="sm" />
+            </div>
+            <div>
+              <FieldLabel>分类</FieldLabel>
+              <Select value={category} onChange={setCategory} options={CATEGORY_OPTIONS} className="w-full mt-1" size="sm" />
+            </div>
+          </div>
+
+          {/* Row 3c: tags */}
+          <div>
+            <FieldLabel>标签</FieldLabel>
+            <TagPills selected={tags} options={TAG_PRESETS} onChange={setTags} />
+          </div>
+
           {/* Row 4: acl + region */}
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -811,6 +753,12 @@ function ChunkEditModal({ chunk, documents, defaultDocId, onClose, onSave }) {
               placeholder="知识块内容"
             />
           </div>
+
+          {!isNew && (
+            <div className="border-t border-slate-100 pt-4">
+              <QuestionsPanel chunkId={chunk.chunk_id} />
+            </div>
+          )}
 
           {error && <p className="text-xs text-red-500">{error}</p>}
         </div>

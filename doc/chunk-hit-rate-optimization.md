@@ -173,7 +173,7 @@ LIMIT $top_vector
 
 **参数归属**：
 ```json
-// config/app_settings.json
+// config.txt/app_settings.json
 { "dense_score_threshold": 0.3 }
 ```
 同步加入 `SettingsWrite` / `SettingsRead`，与 `rerank_threshold` 并列。

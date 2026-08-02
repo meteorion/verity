@@ -30,7 +30,7 @@ export default function ModelConfig() {
     <div className="space-y-4">
       {error && <p className="text-xs text-red-500">{error}</p>}
 
-      {/* Row 1 — four config cards */}
+      {/* Row 1 — four config.txt cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <ConfigCard
           title="大语言模型"
@@ -437,7 +437,7 @@ function PromptVersions() {
       </div>
 
       {showNew && (
-        <ModalShell title="新建 Prompt 版本" onClose={() => setShowNew(false)}>
+        <ModalShell title="新建 Prompt 版本" onClose={() => setShowNew(false)} wide>
           <div className="grid grid-cols-2 gap-3 mb-3">
             <FormRow label="版本号 *">
               <Input placeholder="v4.0.0" value={newForm.version}
@@ -473,7 +473,7 @@ function PromptVersions() {
               <span className="text-[10px] font-semibold text-indigo-600 bg-indigo-100 px-1.5 py-0.5 rounded uppercase tracking-wide">生产</span>
             )}
           </span>
-        } onClose={() => setViewing(null)} tall>
+        } onClose={() => setViewing(null)} tall wide>
           <pre className="text-xs text-slate-700 whitespace-pre-wrap font-mono leading-relaxed">{viewing.content}</pre>
         </ModalShell>
       )}
@@ -501,11 +501,11 @@ function EditModal({ title, children, onClose, onSave, saving, error }) {
   )
 }
 
-function ModalShell({ title, onClose, children, tall }) {
+function ModalShell({ title, onClose, children, tall, wide }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div className={`bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-lg mx-4 flex flex-col ${tall ? 'max-h-[80vh]' : ''}`}>
+      <div className={`bg-white rounded-xl shadow-xl border border-slate-200 w-full mx-4 flex flex-col ${wide ? 'max-w-3xl' : 'max-w-lg'} ${tall ? 'max-h-[80vh]' : ''}`}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
           <span className="text-sm font-semibold text-slate-800">{title}</span>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">

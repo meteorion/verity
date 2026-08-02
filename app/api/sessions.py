@@ -27,6 +27,8 @@ def record_turn(
     transferred: bool,
     transfer_reason: str | None,
     first_token_ms: int | None = None,
+    total_ms: int | None = None,
+    cache_hit: bool = False,
 ):
     now = time.time()
     safe_chunks = [
@@ -62,10 +64,12 @@ def record_turn(
         "answer": answer,
         "intent": intent,
         "faq_hit": faq_hit,
+        "cache_hit": cache_hit,
         "chunks": safe_chunks,
         "transferred": transferred,
         "transfer_reason": transfer_reason,
         "first_token_ms": first_token_ms,
+        "total_ms": total_ms,
         "created_at": now,
     })
 

@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
+import QuestionsPanel from '../components/QuestionsPanel.jsx'
 import { BUSINESS_LINES as BUSINESS_LINE_OPTIONS } from '../config.js'
 import { apiFetch } from '../auth.js'
 
@@ -62,6 +63,25 @@ function PillSelect({ options, selected, catchAll, onToggle, disabled = false, s
     </div>
   )
 }
+
+const DOC_TYPE_OPTIONS = [
+  { value: '', label: '—— 不限 ——' },
+  { value: 'faq', label: 'FAQ' },
+  { value: 'manual', label: '操作手册' },
+  { value: 'policy', label: '政策说明' },
+  { value: 'announcement', label: '公告' },
+  { value: 'other', label: '其他' },
+]
+const CATEGORY_OPTIONS = [
+  { value: '', label: '—— 不限 ——' },
+  { value: 'product', label: '产品' },
+  { value: 'after_sales', label: '售后' },
+  { value: 'complaint', label: '投诉' },
+  { value: 'inquiry', label: '咨询' },
+  { value: 'general', label: '通用' },
+]
+const TAG_PRESETS = ['高优', '紧急', '外部', '常见问题', 'VIP', '退款', '发货', '会员']
+const tagPillOptions = TAG_PRESETS.map(t => ({ key: t, label: t }))
 
 const aclPillOptions = ACL_OPTIONS.map((o) => ({ key: o.value, label: o.label, title: o.desc }))
 const groupPillOptions = (groups) => groups.map((g) => ({ key: g.group_id, label: g.name }))
@@ -611,6 +631,11 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
         </div>
       )}
 
+      <DetailRow
+        label="切分参数"
+        value={`${doc.chunk_size ?? 600} / ${doc.chunk_overlap ?? 80} tokens`}
+      />
+
       <div className="flex items-center justify-between border-b border-slate-50 pb-1.5 text-xs">
         <span className="text-slate-400">Chunk 数</span>
         <div className="flex items-center gap-2">
@@ -715,6 +740,8 @@ function UploadModal({ groups, onClose, onSuccess }) {
   const [businessLine, setBusinessLine] = useState(BUSINESS_LINE_OPTIONS[0])
   const [selectedGroups, setSelectedGroups] = useState(['global'])
   const [selectedAcl, setSelectedAcl] = useState(['role:public'])
+  const [chunkSize, setChunkSize] = useState('600')
+  const [chunkOverlap, setChunkOverlap] = useState('80')
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState(null)
 
@@ -745,6 +772,8 @@ function UploadModal({ groups, onClose, onSuccess }) {
       fd.append('version', version.trim() || '1.0')
       if (effectiveFrom) fd.append('effective_from', effectiveFrom)
       if (effectiveTo) fd.append('effective_to', effectiveTo)
+      if (chunkSize) fd.append('chunk_size', chunkSize)
+      if (chunkOverlap) fd.append('chunk_overlap', chunkOverlap)
 
       const res = await apiFetch('/api/pipeline/ingest', { method: 'POST', body: fd })
       if (!res.ok) throw new Error(await res.text())
@@ -833,6 +862,33 @@ function UploadModal({ groups, onClose, onSuccess }) {
           </div>
         </div>
 
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-slate-500">切分大小 <span className="text-slate-300">tokens</span></label>
+            <input
+              type="number"
+              min="100"
+              max="4000"
+              value={chunkSize}
+              onChange={(e) => setChunkSize(e.target.value)}
+              className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-sm"
+              placeholder="600"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">重叠大小 <span className="text-slate-300">tokens</span></label>
+            <input
+              type="number"
+              min="0"
+              max="500"
+              value={chunkOverlap}
+              onChange={(e) => setChunkOverlap(e.target.value)}
+              className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-sm"
+              placeholder="80"
+            />
+          </div>
+        </div>
+
         <div>
           <label className="text-xs text-slate-500">原文链接 <span className="text-slate-300">（可选）</span></label>
           <input
@@ -870,7 +926,7 @@ function UploadModal({ groups, onClose, onSuccess }) {
         {uploadError && <p className="text-xs text-red-500">{uploadError}</p>}
 
         <p className="text-xs text-slate-400">
-          上传后将自动执行：解析 → PII 脱敏 → 层级化切分（600/80 tokens）→ 向量化入库，预计 15 分钟内生效。
+          上传后将自动执行：解析 → PII 脱敏 → 层级化切分（{chunkSize}/{chunkOverlap} tokens）→ 向量化入库，预计 15 分钟内生效。
         </p>
         <div className="flex justify-end gap-2 pt-2">
           <Button size="sm" onClick={onClose} disabled={uploading}>取消</Button>
@@ -980,7 +1036,7 @@ function ChunksModal({ doc, onClose }) {
   async function deleteChunk(chunk_id) {
     if (!confirm('确认删除该知识块？此操作不可恢复。')) return
     try {
-      const res = await apiFetch(`/api/ops/chunks/${chunk_id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/ops/chunks/${encodeURIComponent(chunk_id)}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(await res.text())
       await loadChunks()
     } catch (e) {
@@ -988,15 +1044,15 @@ function ChunksModal({ doc, onClose }) {
     }
   }
 
-  async function saveChunk({ chunk_id, title, breadcrumb, content }) {
+  async function saveChunk({ chunk_id, title, breadcrumb, content, version, source_url, acl, region, effective_from, effective_to, doc_type, category, tags }) {
     const isNew = !chunk_id
     const url = isNew
       ? `/api/ops/documents/${doc.doc_id}/chunks`
-      : `/api/ops/chunks/${chunk_id}`
+      : `/api/ops/chunks/${encodeURIComponent(chunk_id)}`
     const res = await apiFetch(url, {
       method: isNew ? 'POST' : 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, breadcrumb, content }),
+      body: JSON.stringify({ title, breadcrumb, content, version, source_url, acl, region, effective_from, effective_to, doc_type, category, tags }),
     })
     if (!res.ok) throw new Error(await res.text())
     setChunkModal(null)
@@ -1210,20 +1266,46 @@ function AdmissionModal({ doc, onClose }) {
 }
 
 function ChunkEditModal({ chunk, onClose, onSave }) {
+  const isNew = !chunk?.chunk_id
   const [title, setTitle] = useState(chunk?.title ?? '')
   const [breadcrumb, setBreadcrumb] = useState(chunk?.breadcrumb ?? '')
   const [content, setContent] = useState(chunk?.content ?? '')
   const [version, setVersion] = useState(chunk?.version ?? '')
+  const [sourceUrl, setSourceUrl] = useState(chunk?.source_url ?? '')
+  const [aclStr, setAclStr] = useState((chunk?.acl ?? []).join(', '))
+  const [regionStr, setRegionStr] = useState((chunk?.region ?? []).join(', '))
+  const [effectiveFrom, setEffectiveFrom] = useState(chunk?.effective_from ? String(chunk.effective_from).slice(0, 16).replace(' ', 'T') : '')
+  const [effectiveTo, setEffectiveTo] = useState(chunk?.effective_to ? String(chunk.effective_to).slice(0, 16).replace(' ', 'T') : '')
+  const [docType, setDocType] = useState(chunk?.doc_type ?? '')
+  const [category, setCategory] = useState(chunk?.category ?? '')
+  const [tags, setTags] = useState(chunk?.tags ?? [])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
-  const isNew = !chunk?.chunk_id
+
+  function parseArr(str) {
+    return str.split(',').map(s => s.trim()).filter(Boolean)
+  }
 
   async function handleSubmit() {
     if (!content.trim()) { setError('内容不能为空'); return }
     setSaving(true)
     setError(null)
     try {
-      await onSave({ chunk_id: chunk?.chunk_id, title, breadcrumb, content, version: version.trim() || null })
+      await onSave({
+        chunk_id: chunk?.chunk_id,
+        title,
+        breadcrumb,
+        content,
+        version: version.trim() || null,
+        source_url: sourceUrl.trim() || null,
+        acl: parseArr(aclStr).length ? parseArr(aclStr) : null,
+        region: parseArr(regionStr).length ? parseArr(regionStr) : null,
+        effective_from: effectiveFrom || null,
+        effective_to: effectiveTo || null,
+        doc_type: docType || null,
+        category: category || null,
+        tags: tags.length ? tags : null,
+      })
     } catch (e) {
       setError(e.message)
       setSaving(false)
@@ -1232,67 +1314,119 @@ function ChunkEditModal({ chunk, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-xl p-6 space-y-4">
-        <div className="flex items-center justify-between">
+      <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 shrink-0">
           <h3 className="text-sm font-semibold text-slate-800">{isNew ? '新增知识块' : '编辑知识块'}</h3>
           <button onClick={onClose} disabled={saving} className="text-slate-400 hover:text-slate-600">
             <Icon name="x" size={18} />
           </button>
         </div>
 
-        {!isNew && (
-          <div className="text-[11px] text-slate-400 bg-slate-50 rounded px-2 py-1 font-mono truncate">
-            {chunk.chunk_id}
+        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+          {!isNew && (
+            <div className="text-[11px] text-slate-400 bg-slate-50 rounded px-2 py-1 font-mono truncate">
+              {chunk.chunk_id}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-slate-500">标题</label>
+              <input value={title} onChange={(e) => setTitle(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs"
+                placeholder="章节标题（可选）" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">版本</label>
+              <input value={version} onChange={(e) => setVersion(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs"
+                placeholder={chunk?.version ?? '如 1.0、2.1'} />
+            </div>
           </div>
-        )}
 
-        <div>
-          <label className="text-xs text-slate-500">标题</label>
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs"
-            placeholder="章节标题（可选）"
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="text-xs text-slate-500">路径</label>
-            <input
-              value={breadcrumb}
-              onChange={(e) => setBreadcrumb(e.target.value)}
+            <label className="text-xs text-slate-500">路径（Breadcrumb）</label>
+            <input value={breadcrumb} onChange={(e) => setBreadcrumb(e.target.value)}
               className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs"
-              placeholder="文档标题 > 章节 > 小节"
+              placeholder="文档标题 > 章节 > 小节" />
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-500">来源 URL</label>
+            <input value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)}
+              className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono"
+              placeholder="https://..." />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-slate-500">ACL <span className="text-slate-300">（逗号分隔）</span></label>
+              <input value={aclStr} onChange={(e) => setAclStr(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono"
+                placeholder="role:admin, role:ops" />
+              <p className="text-[10px] text-slate-400 mt-0.5">留空 = 公开</p>
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">地区 <span className="text-slate-300">（逗号分隔）</span></label>
+              <input value={regionStr} onChange={(e) => setRegionStr(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono"
+                placeholder="global, cn" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-slate-500">生效时间</label>
+              <input type="datetime-local" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">失效时间</label>
+              <input type="datetime-local" value={effectiveTo} onChange={(e) => setEffectiveTo(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-slate-500">文档类型</label>
+              <Select value={docType} onChange={setDocType} options={DOC_TYPE_OPTIONS} className="w-full mt-1" size="sm" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">分类</label>
+              <Select value={category} onChange={setCategory} options={CATEGORY_OPTIONS} className="w-full mt-1" size="sm" />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-500 block mb-1.5">标签</label>
+            <PillSelect
+              options={tagPillOptions}
+              selected={tags}
+              onToggle={(t) => setTags(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])}
+              size="sm"
             />
           </div>
+
           <div>
-            <label className="text-xs text-slate-500">
-              版本 <span className="text-slate-300">（留空保持不变）</span>
-            </label>
-            <input
-              value={version}
-              onChange={(e) => setVersion(e.target.value)}
-              className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs"
-              placeholder={chunk?.version ?? '如 1.1、2.0'}
-            />
+            <label className="text-xs text-slate-500">内容 <span className="text-red-400">*</span></label>
+            <textarea value={content} onChange={(e) => setContent(e.target.value)}
+              rows={7}
+              className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs resize-y font-mono leading-relaxed"
+              placeholder="知识块内容" />
           </div>
+
+          {!isNew && (
+            <div className="border-t border-slate-100 pt-4">
+              <QuestionsPanel chunkId={chunk.chunk_id} />
+            </div>
+          )}
+
+          {error && <p className="text-xs text-red-500">{error}</p>}
         </div>
 
-        <div>
-          <label className="text-xs text-slate-500">内容 <span className="text-red-400">*</span></label>
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            rows={8}
-            className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs resize-y font-mono leading-relaxed"
-            placeholder="知识块内容"
-          />
-        </div>
-
-        {error && <p className="text-xs text-red-500">{error}</p>}
-
-        <div className="flex justify-end gap-2 pt-1">
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100 shrink-0">
           <Button size="sm" onClick={onClose} disabled={saving}>取消</Button>
           <Button size="sm" variant="primary" onClick={handleSubmit} disabled={saving}>
             {saving ? '保存中…' : '保存'}

@@ -1,0 +1,59 @@
+# ============================================================
+# Verity — 快速验证配置（DashScope / 阿里云百炼）
+# ============================================================
+
+# ---- API Key（阿里云百炼）----
+OPENAI_API_KEY=sk-ef410c0b642f4826bff705a95e15ba38
+
+# ---- 推理提供者 ----
+EMBEDDING_PROVIDER=api
+EMBEDDING_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_API_KEY=sk-ef410c0b642f4826bff705a95e15ba38
+EMBEDDING_MODEL=text-embedding-v3
+
+RERANK_PROVIDER=none
+NLI_PROVIDER=none
+
+LLM_PROVIDER=openai
+LLM_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_API_KEY=sk-ef410c0b642f4826bff705a95e15ba38
+LLM_MODEL=qwen-plus
+RAGAS_LLM_MODEL=qwen-turbo
+LLM_MAX_TOKENS=800
+LLM_TEMPERATURE=0.2
+
+# ---- 数据库 ----
+POSTGRES_USER=raguser
+POSTGRES_PASSWORD=changeme
+POSTGRES_DB=ragdb
+PGVECTOR_DSN=postgresql://raguser:changeme@postgres:5432/ragdb
+
+# ---- Redis ----
+REDIS_URL=redis://redis:6379/0
+
+# ---- 本地存储 ----
+STORAGE_ROOT=/data/rag
+
+# ---- 模型路径（local 模式才生效）----
+EMBEDDING_MODEL_PATH=/models/bge-m3
+RERANK_MODEL_PATH=/models/bge-reranker-v2-m3
+NLI_MODEL_PATH=/models/chinese-roberta-nli
+
+# ---- 检索参数 ----
+RETRIEVAL_TOP_VECTOR=50
+RETRIEVAL_TOP_K=6
+RERANK_THRESHOLD=0.38
+SEMANTIC_CACHE_THRESHOLD=0.93
+
+SETTINGS_PATH=/config/app_settings.json
+
+# ---- 安全 / JWT ----
+SAFETY_API_KEY=
+JWT_SECRET=changeme-jwt-secret
+JWT_ALGORITHM=HS256
+PROMPT_VERSION=v1.0.0
+
+# ---- 应用启动 ----
+APP_PORT=8000
+APP_START_PERIOD=30s
+EMBEDDING_DIM=1024

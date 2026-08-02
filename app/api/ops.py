@@ -48,7 +48,7 @@ async def list_documents(status: str = "active", limit: int = 50):
             "       d.source_url, d.effective_from, d.effective_to,"
             "       COALESCE(d.acl, '{role:public}') AS acl,"
             "       COALESCE(d.group_ids, '{global}') AS group_ids,"
-            "       d.doc_type,"
+            "       d.doc_type, d.chunk_size, d.chunk_overlap,"
             "       COUNT(c.chunk_id) FILTER (WHERE c.is_parent = FALSE) AS chunk_count"
             " FROM documents d"
             " LEFT JOIN chunks c ON c.doc_id = d.doc_id"
@@ -550,6 +550,9 @@ class ChunkUpsert(BaseModel):
     region: List[str] | None = None
     effective_from: str | None = None  # ISO datetime string, optional
     effective_to: str | None = None    # ISO datetime string, optional
+    doc_type: str | None = None
+    category: str | None = None
+    tags: List[str] | None = None
 
 
 @router.get("/documents/{doc_id}/chunks")
@@ -703,10 +706,15 @@ async def update_chunk(chunk_id: str, body: ChunkUpsert):
                 " region=COALESCE($8, region),"
                 " effective_from=COALESCE($9, effective_from),"
                 " effective_to=COALESCE($10, effective_to),"
-                " embedding=$11, updated_at=now() WHERE chunk_id=$1",
+                " embedding=$11,"
+                " doc_type=COALESCE($12, doc_type),"
+                " category=COALESCE($13, category),"
+                " tags=COALESCE($14, tags),"
+                " updated_at=now() WHERE chunk_id=$1",
                 chunk_id, body.title, body.breadcrumb, body.content,
                 body.version, body.source_url, body.acl, body.region,
                 eff_from, eff_to, embedding,
+                body.doc_type, body.category, body.tags,
             )
         else:
             await conn.execute(
@@ -717,14 +725,19 @@ async def update_chunk(chunk_id: str, body: ChunkUpsert):
                 " region=COALESCE($8, region),"
                 " effective_from=COALESCE($9, effective_from),"
                 " effective_to=COALESCE($10, effective_to),"
+                " doc_type=COALESCE($11, doc_type),"
+                " category=COALESCE($12, category),"
+                " tags=COALESCE($13, tags),"
                 " updated_at=now() WHERE chunk_id=$1",
                 chunk_id, body.title, body.breadcrumb, body.content,
                 body.version, body.source_url, body.acl, body.region,
                 eff_from, eff_to,
+                body.doc_type, body.category, body.tags,
             )
         row = await conn.fetchrow(
             "SELECT chunk_id, title, breadcrumb, content, source_url,"
-            " acl, region, version, effective_from, effective_to, updated_at"
+            " acl, region, version, effective_from, effective_to,"
+            " doc_type, category, tags, updated_at"
             " FROM chunks WHERE chunk_id=$1",
             chunk_id,
         )
@@ -764,6 +777,30 @@ async def list_questions(chunk_id: str):
 
 class QuestionUpdate(BaseModel):
     question: str
+
+
+@router.post("/chunks/{chunk_id}/questions", status_code=201)
+async def add_question(chunk_id: str, body: QuestionUpdate):
+    """Manually add a single question for a chunk, embed and store it."""
+    import asyncio
+    from inference.embedding import embed
+    from pgvector.asyncpg import register_vector
+
+    if not body.question.strip():
+        raise HTTPException(status_code=422, detail="question cannot be empty")
+
+    embed_results = await asyncio.to_thread(embed, [body.question], "dense")
+    vec = embed_results[0].dense
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await register_vector(conn)
+        row = await conn.fetchrow(
+            "INSERT INTO question_embeddings (chunk_id, question, embedding)"
+            " VALUES ($1, $2, $3) RETURNING id, question, created_at",
+            chunk_id, body.question.strip(), vec,
+        )
+    return {"id": row["id"], "question": row["question"], "created_at": row["created_at"]}
 
 
 @router.post("/chunks/{chunk_id}/questions/generate", status_code=201)
@@ -935,7 +972,8 @@ async def list_all_chunks(doc_id: str = "", keyword: str = "", limit: int = 50, 
             f"SELECT c.chunk_id, c.doc_id, d.title AS doc_title,"
             f" c.title, c.breadcrumb, c.content, c.version,"
             f" c.source_url, c.acl, c.region, c.product_line,"
-            f" c.effective_from, c.effective_to, c.updated_at"
+            f" c.effective_from, c.effective_to, c.updated_at,"
+            f" c.doc_type, c.category, c.tags, c.is_parent"
             f" FROM chunks c"
             f" JOIN documents d ON d.doc_id = c.doc_id"
             f" {where}"

@@ -53,10 +53,10 @@ services:
     image: ghcr.io/berriai/litellm:main-stable
     env_file: .env
     volumes:
-      - ./config/litellm.yaml:/app/config/litellm.yaml:ro
+      - ./config.txt/litellm.yaml:/app/config.txt/litellm.yaml:ro
     ports:
       - "127.0.0.1:4000:4000"
-    command: ["--config", "/app/config/litellm.yaml", "--port", "4000"]
+    command: ["--config.txt", "/app/config.txt/litellm.yaml", "--port", "4000"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -129,7 +129,7 @@ services:
 
   # ---- Layer 4: Optional — TLS edge proxy (--profile prod) ----
   # admin-ui / chat-ui now each serve their own SPA via nginx, so this edge only
-  # terminates TLS and routes to those services + app (see config/nginx.conf).
+  # terminates TLS and routes to those services + app (see config.txt/nginx.conf).
   nginx:
     <<: *common
     profiles: [prod]
@@ -138,8 +138,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./config/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./config/certs:/etc/nginx/certs:ro
+      - ./config.txt/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./config.txt/certs:/etc/nginx/certs:ro
     depends_on:
       app:
         condition: service_healthy

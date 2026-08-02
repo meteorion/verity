@@ -277,7 +277,7 @@ GET /api/tickets/handlers
 ### 7.1 处理人配置（代码写死，P2 再做数据库配置）
 
 ```python
-# app/tickets/config.py
+# app/tickets/config.txt.py
 HANDLERS = {
     "handler_001": {
         "name": "李晓燕",
