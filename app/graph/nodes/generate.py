@@ -132,6 +132,14 @@ async def generate_node(state: OrchestratorState) -> dict:
             nli_check(answer, [c.get("content", "") for c in chunks])
         )
 
+    # Write to semantic cache asynchronously so it benefits future identical queries
+    vec = state.get("query_embedding")
+    if vec and chunks and answer:
+        from graph.nodes.rewrite import write_cache
+        query_for_cache = state.get("query_rewritten") or state["query_raw"]
+        chunk_ids = [c.get("chunk_id", "") for c in chunks]
+        asyncio.create_task(write_cache(query_for_cache, vec, answer, chunk_ids))
+
     return {"answer_stream": answer, "nli_flags": []}
 
 

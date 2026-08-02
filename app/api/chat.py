@@ -90,6 +90,8 @@ async def chat(req: ChatRequest, request: Request):
                     "retrieved_chunks": [],
                     "intent": None,
                     "faq_hit": False,
+                    "cache_hit": False,
+                    "query_embedding": None,
                     "transferred": False,
                     "transfer_reason": None,
                 },

@@ -12,6 +12,7 @@ async def rag_node(state: OrchestratorState) -> dict:
         region=state["region"],
         project_group=state.get("project_group"),
         top_k=top_k,
+        dense_vec=state.get("query_embedding"),  # reuse pre-computed vector from rewrite_node
     )
     chunks = await expand_to_parent(chunks)
     return {"retrieved_chunks": chunks}

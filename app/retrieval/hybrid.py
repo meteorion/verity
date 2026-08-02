@@ -69,14 +69,22 @@ async def hybrid_retrieve(
     region: str,
     project_group: str | None = None,
     top_k: int | None = None,
+    dense_vec: list[float] | None = None,  # pre-computed by rewrite_node; avoids re-embedding
 ) -> list[dict[str, Any]]:
     cfg = _retrieval_cfg()
     if top_k is None:
         top_k = cfg["top_k"]
 
-    embed_results = await asyncio.to_thread(emb_mod.embed, [query], mode="both")
-    dense_vec = embed_results[0].dense
-    sparse_vec = embed_results[0].sparse  # None in API mode
+    if dense_vec is not None and _EMBEDDING_PROVIDER != "local":
+        # API mode: dense only; reuse pre-computed vector directly
+        sparse_vec = None
+    else:
+        # Local mode needs sparse, or dense_vec wasn't supplied: embed now
+        mode = "sparse" if (dense_vec is not None and _EMBEDDING_PROVIDER == "local") else "both"
+        embed_results = await asyncio.to_thread(emb_mod.embed, [query], mode=mode)
+        if dense_vec is None:
+            dense_vec = embed_results[0].dense
+        sparse_vec = embed_results[0].sparse
 
     pool = await _get_pool()
 

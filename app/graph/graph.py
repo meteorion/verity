@@ -4,6 +4,7 @@ from graph.state import OrchestratorState
 from graph.nodes.safety import safety_node
 from graph.nodes.faq import faq_node
 from graph.nodes.intent import intent_node
+from graph.nodes.rewrite import rewrite_node
 from graph.nodes.rag import rag_node
 from graph.nodes.tool import tool_node
 from graph.nodes.generate import generate_node
@@ -29,9 +30,14 @@ def _route_after_intent(state: OrchestratorState) -> str:
         case "tool":
             return "tool"
         case _:
-            # "rag", "chitchat", and any unknown intent all go through rag node
-            # (rag node returns no chunks for chitchat; LLM handles it naturally)
-            return "rag"
+            # All RAG/chitchat paths go through rewrite (normalize + cache + coref)
+            return "rewrite"
+
+
+def _route_after_rewrite(state: OrchestratorState) -> str:
+    if state.get("cache_hit"):
+        return END
+    return "rag"
 
 
 def build_graph(checkpointer=None):
@@ -40,6 +46,7 @@ def build_graph(checkpointer=None):
     g.add_node("safety", safety_node)
     g.add_node("faq", faq_node)
     g.add_node("intent", intent_node)
+    g.add_node("rewrite", rewrite_node)
     g.add_node("rag", rag_node)
     g.add_node("tool", tool_node)
     g.add_node("generate", generate_node)
@@ -49,6 +56,7 @@ def build_graph(checkpointer=None):
     g.add_conditional_edges("safety", _route_after_safety, {"faq": "faq", END: END})
     g.add_conditional_edges("faq", _route_after_faq, {"intent": "intent", END: END})
     g.add_conditional_edges("intent", _route_after_intent)
+    g.add_conditional_edges("rewrite", _route_after_rewrite, {"rag": "rag", END: END})
     g.add_edge("rag", "generate")
     g.add_edge("tool", "generate")
     g.add_edge("generate", END)

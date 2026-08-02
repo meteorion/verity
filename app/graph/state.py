@@ -25,3 +25,6 @@ class OrchestratorState(TypedDict):
     # Per-request runtime options (set by API layer, read by nodes)
     top_k:            int | None
     llm_temperature:  float | None
+    # Query rewrite / semantic cache
+    cache_hit:        bool
+    query_embedding:  list[float] | None
