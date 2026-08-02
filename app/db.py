@@ -199,6 +199,8 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS group_ids TEXT[] DEFAULT '{{global}}';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_type TEXT;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS acl TEXT[] DEFAULT '{{role:public}}';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS chunk_size INT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS chunk_overlap INT;
 
 -- Migrate existing document_groups data into documents.group_ids for installs
 -- that still have the old junction table.

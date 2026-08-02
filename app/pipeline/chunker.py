@@ -116,6 +116,8 @@ async def chunk_document(
     doc_type: str | None = None,
     category: str | None = None,
     tags: list[str] | None = None,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
 ) -> list[Chunk]:
     markdown: str = parsed.get("markdown", "")
     doc_title: str = parsed.get("metadata", {}).get("title", doc_id)
@@ -125,7 +127,13 @@ async def chunk_document(
     chunk_tags = list(tags) if tags else []
 
     sections = _parse_sections(markdown)
-    chunk_size, chunk_overlap = _get_chunk_params()
+    # doc_chunk_* = explicit per-doc override (stored in DB, None means "use global").
+    # effective_* = what actually drives the split logic.
+    doc_chunk_size = chunk_size
+    doc_chunk_overlap = chunk_overlap
+    settings_size, settings_overlap = _get_chunk_params()
+    effective_chunk_size = doc_chunk_size if doc_chunk_size is not None else settings_size
+    effective_chunk_overlap = doc_chunk_overlap if doc_chunk_overlap is not None else settings_overlap
 
     heading_stack: list[str] = []
     all_chunks: list[Chunk] = []
@@ -162,7 +170,7 @@ async def chunk_document(
             updated_at=updated_at,
         )
 
-        if _token_est(body) <= chunk_size:
+        if _token_est(body) <= effective_chunk_size:
             # Small section — single retrieval chunk, no parent row needed.
             # Prefix with breadcrumb for embedding consistency with sub-chunks.
             all_chunks.append(Chunk(
@@ -186,7 +194,7 @@ async def chunk_document(
             ))
 
             breadcrumb_line = breadcrumb + ":"
-            sub_texts = _split_by_paragraphs(body, breadcrumb_line, chunk_size, chunk_overlap)
+            sub_texts = _split_by_paragraphs(body, breadcrumb_line, effective_chunk_size, effective_chunk_overlap)
             for chunk_idx, content in enumerate(sub_texts):
                 all_chunks.append(Chunk(
                     chunk_id=f"{doc_id}#{section_idx:03d}_{chunk_idx:03d}",
@@ -212,9 +220,10 @@ async def chunk_document(
                 doc_id, title, owner_email, business_line,
                 source_type, source_path, source_url,
                 version, effective_from, effective_to,
-                acl, group_ids, doc_type, status, updated_at
+                acl, group_ids, doc_type, chunk_size, chunk_overlap,
+                status, updated_at
             )
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',now())
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',now())
             ON CONFLICT (doc_id) DO UPDATE SET
                 updated_at     = now(),
                 status         = 'pending',
@@ -225,12 +234,14 @@ async def chunk_document(
                 version        = COALESCE(EXCLUDED.version, documents.version),
                 effective_from = COALESCE(EXCLUDED.effective_from, documents.effective_from),
                 effective_to   = COALESCE(EXCLUDED.effective_to, documents.effective_to),
-                doc_type       = COALESCE(EXCLUDED.doc_type, documents.doc_type)
+                doc_type       = COALESCE(EXCLUDED.doc_type, documents.doc_type),
+                chunk_size     = COALESCE(EXCLUDED.chunk_size, documents.chunk_size),
+                chunk_overlap  = COALESCE(EXCLUDED.chunk_overlap, documents.chunk_overlap)
             """,
             doc_id, doc_title, owner, business_line,
             "upload", source_path, source_url,
             version, effective_from, effective_to,
-            chunk_acl, product_line, doc_type,
+            chunk_acl, product_line, doc_type, doc_chunk_size, doc_chunk_overlap,
         )
 
     return all_chunks

@@ -36,6 +36,11 @@ async def ingest(
     version: str = Form("1.0"),
     effective_from: str = Form(""),
     effective_to: str = Form(""),
+    doc_type: str = Form(""),
+    category: str = Form(""),
+    tags: str = Form(""),
+    chunk_size: int = Form(0),
+    chunk_overlap: int = Form(0),
 ):
     raw_path = _STORAGE_ROOT / "raw" / doc_id / file.filename
     raw_path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,6 +49,7 @@ async def ingest(
 
     groups = [g.strip() for g in group_ids.split(",") if g.strip()] or ["global"]
     acl = [r.strip() for r in acl_roles.split(",") if r.strip()] or ["role:public"]
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     ver = version.strip() or "1.0"
     eff_from = _parse_dt(effective_from)
     eff_to = _parse_dt(effective_to)
@@ -58,6 +64,11 @@ async def ingest(
         effective_from=eff_from,
         effective_to=eff_to,
         acl=acl,
+        doc_type=doc_type.strip() or None,
+        category=category.strip() or None,
+        tags=tag_list,
+        chunk_size=chunk_size if chunk_size > 0 else None,
+        chunk_overlap=chunk_overlap if chunk_overlap > 0 else None,
     )
     embedded = await embed_chunks(chunks)
     result = await index_chunks(embedded)

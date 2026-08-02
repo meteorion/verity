@@ -19,6 +19,8 @@ class Document:
     effective_to: datetime | None = None
     acl: list[str] = field(default_factory=lambda: ["role:public"])
     doc_type: str | None = None  # FAQ / 操作手册 / 政策说明 / 合同模板
+    chunk_size: int | None = None    # per-doc override; None = use global setting
+    chunk_overlap: int | None = None
     status: str = "pending"
 
 

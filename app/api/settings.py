@@ -63,6 +63,9 @@ class SettingsRead(BaseModel):
     rerank_threshold: float
     chunk_size: int
     chunk_overlap: int
+    dense_score_threshold: float  # min cosine similarity for dense retrieval (0 = off)
+    rrf_alpha: float              # dense weight in weighted RRF (0-1, 1-α = sparse weight)
+    ef_search: int                # HNSW ef_search (higher = better recall, slower query)
 
 
 class SettingsWrite(BaseModel):
@@ -80,6 +83,9 @@ class SettingsWrite(BaseModel):
     rerank_threshold: Optional[float] = None
     chunk_size: Optional[int] = None
     chunk_overlap: Optional[int] = None
+    dense_score_threshold: Optional[float] = None
+    rrf_alpha: Optional[float] = None
+    ef_search: Optional[int] = None
 
 
 @router.get("", response_model=SettingsRead)
@@ -125,6 +131,9 @@ async def get_settings():
         rerank_threshold=_float("rerank_threshold", "RERANK_THRESHOLD", 0.38),
         chunk_size=_int("chunk_size", "CHUNK_SIZE", 600),
         chunk_overlap=_int("chunk_overlap", "CHUNK_OVERLAP", 80),
+        dense_score_threshold=_float("dense_score_threshold", "DENSE_SCORE_THRESHOLD", 0.0),
+        rrf_alpha=_float("rrf_alpha", "RRF_ALPHA", 0.6),
+        ef_search=_int("ef_search", "EF_SEARCH", 40),
     )
 
 

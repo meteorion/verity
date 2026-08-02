@@ -96,6 +96,7 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
         doc = await conn.fetchrow(
             "SELECT title, owner_email, business_line, source_path,"
             " version, effective_from, effective_to, doc_type,"
+            " chunk_size, chunk_overlap,"
             " COALESCE(acl, '{role:public}') AS acl,"
             " COALESCE(group_ids, '{global}') AS group_ids"
             " FROM documents WHERE doc_id=$1",
@@ -112,6 +113,8 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
         doc_eff_to = doc["effective_to"]
         doc_acl: list[str] = list(doc["acl"]) if doc["acl"] else ["role:public"]
         doc_type: str | None = doc["doc_type"]
+        doc_chunk_size: int | None = doc["chunk_size"]
+        doc_chunk_overlap: int | None = doc["chunk_overlap"]
     finally:
         await _release_conn(conn)
 
@@ -165,6 +168,8 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
         effective_to=doc_eff_to,
         acl=doc_acl,
         doc_type=doc_type,
+        chunk_size=doc_chunk_size,
+        chunk_overlap=doc_chunk_overlap,
     )
     embedded = await embed_chunks(chunks)
     result = await index_chunks(embedded)
@@ -207,6 +212,8 @@ class DocUpdate(BaseModel):
     effective_from: str | None = None
     effective_to: str | None = None
     doc_type: str | None = None
+    chunk_size: int | None = None
+    chunk_overlap: int | None = None
 
 
 @router.put("/documents/{doc_id}")

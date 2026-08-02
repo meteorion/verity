@@ -1,7 +1,7 @@
-"""Hybrid retrieval: dense (always) + sparse (local provider only) → RRF → Rerank.
+"""Hybrid retrieval: dense (always) + sparse (local provider only) → weighted RRF → Rerank.
 
 API embedding mode: dense-only vector search via PGVector.
-Local embedding mode: concurrent dense + sparse → RRF fusion → rerank.
+Local embedding mode: concurrent dense + sparse → weighted RRF fusion → rerank.
 ACL/region filtering is enforced at the WHERE clause level (never post-filter).
 """
 import asyncio
@@ -22,23 +22,44 @@ _TOP_VECTOR = int(os.getenv("RETRIEVAL_TOP_VECTOR", "50"))
 _TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "6"))
 
 
-def _retrieval_cfg() -> tuple[int, int]:
+def _retrieval_cfg() -> dict[str, Any]:
     try:
         from api.settings import load_settings
         s = load_settings()
-        return (
-            int(s.get("retrieval_top_k") or _TOP_K),
-            int(s.get("retrieval_top_vector") or _TOP_VECTOR),
-        )
+        return {
+            "top_k":                int(s.get("retrieval_top_k") or _TOP_K),
+            "top_vector":           int(s.get("retrieval_top_vector") or _TOP_VECTOR),
+            "dense_score_threshold": float(s.get("dense_score_threshold") or 0.0),
+            "rrf_alpha":            float(s.get("rrf_alpha") or 0.6),
+            "ef_search":            int(s.get("ef_search") or 40),
+        }
     except Exception:
-        return _TOP_K, _TOP_VECTOR
+        return {
+            "top_k":                _TOP_K,
+            "top_vector":           _TOP_VECTOR,
+            "dense_score_threshold": 0.0,
+            "rrf_alpha":            0.6,
+            "ef_search":            40,
+        }
 
 
-def _rrf_merge(rankings: list[list[str]], k: int = 60) -> list[str]:
+def _rrf_merge(
+    rankings: list[list[str]],
+    weights: list[float] | None = None,
+    k: int = 60,
+) -> list[str]:
+    """Weighted Reciprocal Rank Fusion.
+
+    weights[i] scales the contribution of rankings[i]; defaults to equal weights.
+    For hybrid retrieval pass [alpha, 1-alpha] so dense and sparse can be tuned
+    independently without changing the absolute scale.
+    """
+    if weights is None:
+        weights = [1.0] * len(rankings)
     scores: dict[str, float] = {}
-    for ranking in rankings:
+    for ranking, w in zip(rankings, weights):
         for rank, chunk_id in enumerate(ranking, start=1):
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + w / (k + rank)
     return sorted(scores, key=lambda x: scores[x], reverse=True)
 
 
@@ -49,38 +70,40 @@ async def hybrid_retrieve(
     project_group: str | None = None,
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
-    cfg_top_k, cfg_top_vector = _retrieval_cfg()
+    cfg = _retrieval_cfg()
     if top_k is None:
-        top_k = cfg_top_k
+        top_k = cfg["top_k"]
 
-    # embed() is synchronous and blocking (local CPU inference, or a blocking
-    # httpx.post in API mode) — offload to a thread so it never stalls the event loop.
     embed_results = await asyncio.to_thread(emb_mod.embed, [query], mode="both")
     dense_vec = embed_results[0].dense
     sparse_vec = embed_results[0].sparse  # None in API mode
 
     pool = await _get_pool()
 
-    # Dense retrieval is always available
-    dense_rows = await _dense_search(pool, dense_vec, roles, region, cfg_top_vector, project_group)
+    dense_rows = await _dense_search(
+        pool, dense_vec, roles, region, cfg["top_vector"], project_group,
+        ef_search=cfg["ef_search"],
+        min_score=cfg["dense_score_threshold"],
+    )
 
     if sparse_vec and _EMBEDDING_PROVIDER == "local":
-        # Sparse retrieval only makes sense with BGE-M3 sparse output
-        sparse_rows = await _sparse_search(pool, sparse_vec, roles, region, cfg_top_vector, project_group)
+        sparse_rows = await _sparse_search(
+            pool, sparse_vec, roles, region, cfg["top_vector"], project_group,
+        )
         dense_ids = [r["chunk_id"] for r in dense_rows]
         sparse_ids = [r["chunk_id"] for r in sparse_rows]
-        merged_ids = _rrf_merge([dense_ids, sparse_ids])
+        alpha = cfg["rrf_alpha"]
+        merged_ids = _rrf_merge([dense_ids, sparse_ids], weights=[alpha, 1.0 - alpha])
         row_map = {r["chunk_id"]: dict(r) for r in [*dense_rows, *sparse_rows]}
         candidates = [row_map[cid] for cid in merged_ids if cid in row_map]
         logger.debug(
-            "Hybrid RRF merge: dense=%d sparse=%d merged=%d",
-            len(dense_ids), len(sparse_ids), len(candidates),
+            "Hybrid RRF merge: dense=%d sparse=%d merged=%d alpha=%.2f",
+            len(dense_ids), len(sparse_ids), len(candidates), alpha,
         )
     else:
         candidates = [dict(r) for r in dense_rows]
         logger.debug("Dense-only retrieval: candidates=%d", len(candidates))
 
-    # Rerank (no-op when RERANK_PROVIDER=none)
     passages = [c["content"] for c in candidates]
     ranked = rerank_mod.rerank(query, passages)
     results = [candidates[r["index"]] for r in ranked[:top_k] if r["index"] < len(candidates)]
@@ -95,11 +118,11 @@ async def _dense_search(
     region: str,
     limit: int,
     project_group: str | None = None,
+    ef_search: int = 40,
+    min_score: float = 0.0,
 ) -> list[asyncpg.Record]:
     vec_str = "[" + ",".join(str(v) for v in vec) + "]"
     pg_clause = ""
-    # When roles is empty, skip the overlap check — only public docs are accessible.
-    # Passing an empty Python list to asyncpg can cause type-inference errors.
     if roles:
         acl_clause = "($2::text[] && acl OR 'role:public' = ANY(acl))"
         args: list = [vec_str, roles, region, limit]
@@ -113,6 +136,13 @@ async def _dense_search(
         args.append(project_group)
     region_idx = 3 if roles else 2
     limit_idx = 4 if roles else 3
+
+    # min_score is a settings float (not user input) — safe to inline.
+    score_clause = (
+        f" AND 1 - (embedding <=> $1::vector) >= {min_score:.6f}"
+        if min_score > 0.0 else ""
+    )
+
     sql = f"""
         SELECT chunk_id, doc_id, content, breadcrumb, source_url, title,
                1 - (embedding <=> $1::vector) AS score
@@ -122,12 +152,16 @@ async def _dense_search(
           AND (effective_from IS NULL OR effective_from <= now())
           AND (effective_to   IS NULL OR effective_to   >  now())
           AND is_parent = FALSE
+          {score_clause}
           {pg_clause}
         ORDER BY embedding <=> $1::vector
         LIMIT ${limit_idx}
     """
+    # SET LOCAL hnsw.ef_search only takes effect within a transaction block.
     async with pool.acquire() as conn:
-        return await conn.fetch(sql, *args)
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL hnsw.ef_search = {ef_search}")
+            return await conn.fetch(sql, *args)
 
 
 async def _sparse_search(
