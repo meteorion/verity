@@ -37,6 +37,131 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
     ON chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 200);
 CREATE INDEX IF NOT EXISTS chunks_doc_version_idx ON chunks (doc_id, version);
+
+-- Evaluation tables
+CREATE TABLE IF NOT EXISTS eval_datasets (
+    dataset_id   TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT DEFAULT '',
+    source_type  TEXT NOT NULL DEFAULT 'manual',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Ragas-standard dataset items: question + ground_truth
+-- (answer and contexts are produced at eval time, not stored here)
+CREATE TABLE IF NOT EXISTS eval_dataset_items (
+    item_id      TEXT PRIMARY KEY,
+    dataset_id   TEXT NOT NULL REFERENCES eval_datasets(dataset_id) ON DELETE CASCADE,
+    question     TEXT NOT NULL,
+    ground_truth TEXT DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_eval_items_dataset ON eval_dataset_items(dataset_id);
+
+-- Ragas-standard eval records: stores full RAG pipeline output
+CREATE TABLE IF NOT EXISTS eval_records (
+    record_id            TEXT PRIMARY KEY,
+    dataset_id           TEXT NOT NULL,
+    item_id              TEXT,
+    batch_record_id      TEXT,
+    run_type             TEXT NOT NULL DEFAULT 'single',
+    question             TEXT NOT NULL,
+    answer               TEXT DEFAULT '',
+    contexts             TEXT[] DEFAULT '{{}}',
+    ground_truth         TEXT DEFAULT '',
+    retrieved_chunk_ids  TEXT[] DEFAULT '{{}}',
+    top_k                INT DEFAULT 5,
+    latency_ms           INT DEFAULT 0,
+    ragas_metrics        JSONB DEFAULT '{{}}',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_eval_records_dataset ON eval_records(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_eval_records_item ON eval_records(item_id);
+CREATE INDEX IF NOT EXISTS idx_eval_records_batch ON eval_records(batch_record_id);
+
+CREATE TABLE IF NOT EXISTS eval_batch_runs (
+    batch_record_id   TEXT PRIMARY KEY,
+    dataset_id        TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'running',
+    total_items       INT DEFAULT 0,
+    completed_items   INT DEFAULT 0,
+    error_msg         TEXT DEFAULT '',
+    aggregate_metrics JSONB DEFAULT '{{}}',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at      TIMESTAMPTZ
+);
+
+ALTER TABLE eval_records ADD COLUMN IF NOT EXISTS retrieval_ms INT DEFAULT 0;
+
+-- Ticket tables
+CREATE TABLE IF NOT EXISTS tickets (
+    ticket_id    TEXT PRIMARY KEY,
+    ticket_type  TEXT NOT NULL,
+    session_id   TEXT,
+    status       TEXT NOT NULL DEFAULT 'open',
+    fields       JSONB NOT NULL DEFAULT '{{}}',
+    contact      TEXT,
+    assignee_id  TEXT,
+    assigned_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    updated_at   TIMESTAMPTZ DEFAULT now(),
+    resolved_at  TIMESTAMPTZ,
+    closed_at    TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS tickets_status_created_idx ON tickets (status, created_at);
+CREATE INDEX IF NOT EXISTS tickets_assignee_status_idx ON tickets (assignee_id, status);
+
+CREATE TABLE IF NOT EXISTS notification_logs (
+    id          BIGSERIAL PRIMARY KEY,
+    ticket_id   TEXT NOT NULL,
+    handler_id  TEXT NOT NULL,
+    notify_type TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS notification_logs_ticket_handler_idx
+    ON notification_logs (ticket_id, handler_id, notify_type);
+
+-- Column migrations for existing installs.
+-- Wrapped in DO blocks so that references to old column names (ground_truth_answer,
+-- query, retrieved_contexts) are silently skipped on fresh installs where those
+-- columns never existed; existing installs get the data copied as before.
+ALTER TABLE eval_dataset_items ADD COLUMN IF NOT EXISTS ground_truth TEXT DEFAULT '';
+DO $$
+BEGIN
+    UPDATE eval_dataset_items SET ground_truth = ground_truth_answer
+        WHERE ground_truth = '' AND ground_truth_answer IS NOT NULL AND ground_truth_answer != '';
+EXCEPTION WHEN undefined_column THEN NULL;
+END $$;
+
+ALTER TABLE eval_records ADD COLUMN IF NOT EXISTS question TEXT;
+DO $$
+BEGIN
+    UPDATE eval_records SET question = query WHERE question IS NULL;
+EXCEPTION WHEN undefined_column THEN NULL;
+END $$;
+ALTER TABLE eval_records ALTER COLUMN question SET DEFAULT '';
+ALTER TABLE eval_records ADD COLUMN IF NOT EXISTS answer TEXT DEFAULT '';
+ALTER TABLE eval_records ADD COLUMN IF NOT EXISTS contexts TEXT[] DEFAULT '{{}}';
+DO $$
+BEGIN
+    UPDATE eval_records SET contexts = retrieved_contexts
+        WHERE contexts = '{{}}' AND retrieved_contexts != '{{}}';
+EXCEPTION WHEN undefined_column THEN NULL;
+END $$;
+ALTER TABLE eval_records ADD COLUMN IF NOT EXISTS ground_truth TEXT DEFAULT '';
+DO $$
+BEGIN
+    ALTER TABLE eval_records ALTER COLUMN query DROP NOT NULL;
+    ALTER TABLE eval_records ALTER COLUMN query SET DEFAULT '';
+EXCEPTION WHEN undefined_column THEN NULL;
+END $$;
+
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT '';
 """
 
 

@@ -1,12 +1,17 @@
 """Ops API: document management, knowledge-base metrics, and project group CRUD."""
+import csv
+import io
+import json
 import logging
 import os
 import shutil
+import time as _time
 from pathlib import Path
 from typing import List
 
 import asyncpg
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from db import get_pool
@@ -37,22 +42,28 @@ async def _release_conn(conn) -> None:
 async def list_documents(status: str = "active", limit: int = 50):
     conn = await _get_conn()
     try:
-        rows = await conn.fetch(
+        _select = (
             "SELECT d.doc_id, d.title, d.owner_email, d.business_line, d.status,"
-            "       d.admission_score, d.updated_at,"
+            "       d.admission_score, d.updated_at, d.version, d.source_type,"
+            "       d.source_url, d.effective_from, d.effective_to,"
             "       COALESCE(d.acl, '{role:public}') AS acl,"
             "       COUNT(c.chunk_id) AS chunk_count,"
             "       ARRAY(SELECT group_id FROM document_groups WHERE doc_id = d.doc_id) AS group_ids"
             " FROM documents d"
             " LEFT JOIN chunks c ON c.doc_id = d.doc_id"
             "   AND (c.effective_to IS NULL OR c.effective_to > now())"
-            " WHERE d.status=$1"
-            " GROUP BY d.doc_id"
-            " ORDER BY d.updated_at DESC"
-            " LIMIT $2",
-            status,
-            limit,
         )
+        if status == "all":
+            rows = await conn.fetch(
+                _select + " GROUP BY d.doc_id ORDER BY d.updated_at DESC LIMIT $1",
+                limit,
+            )
+        else:
+            rows = await conn.fetch(
+                _select + " WHERE d.status=$1 GROUP BY d.doc_id ORDER BY d.updated_at DESC LIMIT $2",
+                status,
+                limit,
+            )
         return {"documents": [dict(r) for r in rows]}
     except Exception:
         logger.exception("list_documents failed")
@@ -179,6 +190,40 @@ async def disable_document(doc_id: str):
                 doc_id,
             )
         return {"doc_id": doc_id, "status": "disabled"}
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Document metadata update
+# ---------------------------------------------------------------------------
+
+class DocUpdate(BaseModel):
+    title: str | None = None
+    owner_email: str | None = None
+    business_line: str | None = None
+    version: str | None = None
+    source_url: str | None = None
+    effective_from: str | None = None
+    effective_to: str | None = None
+
+
+@router.put("/documents/{doc_id}")
+async def update_document(doc_id: str, body: DocUpdate):
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        return {"doc_id": doc_id}
+    set_clause = ", ".join(f"{k}=${i + 2}" for i, k in enumerate(updates))
+    values = list(updates.values())
+    conn = await _get_conn()
+    try:
+        result = await conn.execute(
+            f"UPDATE documents SET {set_clause}, updated_at=now() WHERE doc_id=$1",
+            doc_id, *values,
+        )
+        if result == "UPDATE 0":
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"doc_id": doc_id, **updates}
     finally:
         await _release_conn(conn)
 
@@ -491,6 +536,11 @@ class ChunkUpsert(BaseModel):
     breadcrumb: str = ""
     content: str
     version: str | None = None
+    source_url: str | None = None
+    acl: List[str] | None = None
+    region: List[str] | None = None
+    effective_from: str | None = None  # ISO datetime string, optional
+    effective_to: str | None = None    # ISO datetime string, optional
 
 
 @router.get("/documents/{doc_id}/chunks")
@@ -513,6 +563,97 @@ async def list_chunks(doc_id: str):
         await _release_conn(conn)
 
 
+_EXPORT_FIELDS = ["chunk_id", "doc_id", "doc_title", "title", "breadcrumb",
+                  "content", "version", "source_url", "effective_from", "effective_to"]
+
+
+@router.get("/chunks/export")
+async def export_chunks(doc_id: str = "", keyword: str = "", format: str = "csv"):
+    """Export all matching chunks as CSV or JSONL (no pagination)."""
+    conn = await _get_conn()
+    try:
+        conditions = ["(c.effective_to IS NULL OR c.effective_to > now())"]
+        args: list = []
+        idx = 1
+        if doc_id:
+            conditions.append(f"c.doc_id=${idx}")
+            args.append(doc_id)
+            idx += 1
+        if keyword:
+            conditions.append(
+                f"(c.content ILIKE ${idx} OR c.title ILIKE ${idx} OR c.breadcrumb ILIKE ${idx})"
+            )
+            args.append(f"%{keyword}%")
+            idx += 1
+
+        where = "WHERE " + " AND ".join(conditions)
+        rows = await conn.fetch(
+            f"SELECT c.chunk_id, c.doc_id, d.title AS doc_title,"
+            f" c.title, c.breadcrumb, c.content, c.version,"
+            f" c.source_url, c.effective_from, c.effective_to"
+            f" FROM chunks c"
+            f" JOIN documents d ON d.doc_id = c.doc_id"
+            f" {where}"
+            f" ORDER BY c.doc_id, c.updated_at DESC",
+            *args,
+        )
+    finally:
+        await _release_conn(conn)
+
+    def _str(v):
+        if v is None:
+            return ""
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v)
+
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=_EXPORT_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({f: _str(dict(r).get(f)) for f in _EXPORT_FIELDS})
+        content = buf.getvalue()
+        media_type = "text/csv"
+        suffix = "csv"
+    else:
+        lines = []
+        for r in rows:
+            lines.append(json.dumps({f: _str(dict(r).get(f)) for f in _EXPORT_FIELDS}, ensure_ascii=False))
+        content = "\n".join(lines)
+        media_type = "application/x-ndjson"
+        suffix = "jsonl"
+
+    filename = f"chunks_export.{suffix}"
+    return StreamingResponse(
+        iter([content.encode("utf-8")]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/chunks/{chunk_id}")
+async def get_chunk(chunk_id: str):
+    conn = await _get_conn()
+    try:
+        row = await conn.fetchrow(
+            "SELECT c.chunk_id, c.doc_id, d.title AS doc_title,"
+            " c.title, c.breadcrumb, c.content, c.source_url,"
+            " c.acl, c.region, c.product_line, c.version,"
+            " c.effective_from, c.effective_to,"
+            " c.parent_chunk_id, c.parent_path, c.updated_at"
+            " FROM chunks c"
+            " JOIN documents d ON d.doc_id = c.doc_id"
+            " WHERE c.chunk_id=$1",
+            chunk_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        return dict(row)
+    finally:
+        await _release_conn(conn)
+
+
 @router.put("/chunks/{chunk_id}")
 async def update_chunk(chunk_id: str, body: ChunkUpsert):
     from inference.embedding import embed
@@ -525,6 +666,22 @@ async def update_chunk(chunk_id: str, body: ChunkUpsert):
     except Exception:
         pass
 
+    # Parse effective_from / effective_to ISO strings
+    eff_from = None
+    eff_to = None
+    if body.effective_from:
+        try:
+            from datetime import datetime, timezone
+            eff_from = datetime.fromisoformat(body.effective_from.replace("Z", "+00:00"))
+        except Exception:
+            pass
+    if body.effective_to:
+        try:
+            from datetime import datetime, timezone
+            eff_to = datetime.fromisoformat(body.effective_to.replace("Z", "+00:00"))
+        except Exception:
+            pass
+
     conn = await _get_conn()
     try:
         if embedding is not None:
@@ -532,19 +689,33 @@ async def update_chunk(chunk_id: str, body: ChunkUpsert):
             await conn.execute(
                 "UPDATE chunks SET title=$2, breadcrumb=$3, content=$4,"
                 " version=COALESCE($5, version),"
-                " embedding=$6, updated_at=now() WHERE chunk_id=$1",
+                " source_url=COALESCE($6, source_url),"
+                " acl=COALESCE($7, acl),"
+                " region=COALESCE($8, region),"
+                " effective_from=COALESCE($9, effective_from),"
+                " effective_to=COALESCE($10, effective_to),"
+                " embedding=$11, updated_at=now() WHERE chunk_id=$1",
                 chunk_id, body.title, body.breadcrumb, body.content,
-                body.version, embedding,
+                body.version, body.source_url, body.acl, body.region,
+                eff_from, eff_to, embedding,
             )
         else:
             await conn.execute(
                 "UPDATE chunks SET title=$2, breadcrumb=$3, content=$4,"
                 " version=COALESCE($5, version),"
+                " source_url=COALESCE($6, source_url),"
+                " acl=COALESCE($7, acl),"
+                " region=COALESCE($8, region),"
+                " effective_from=COALESCE($9, effective_from),"
+                " effective_to=COALESCE($10, effective_to),"
                 " updated_at=now() WHERE chunk_id=$1",
-                chunk_id, body.title, body.breadcrumb, body.content, body.version,
+                chunk_id, body.title, body.breadcrumb, body.content,
+                body.version, body.source_url, body.acl, body.region,
+                eff_from, eff_to,
             )
         row = await conn.fetchrow(
-            "SELECT chunk_id, title, breadcrumb, content, updated_at"
+            "SELECT chunk_id, title, breadcrumb, content, source_url,"
+            " acl, region, version, effective_from, effective_to, updated_at"
             " FROM chunks WHERE chunk_id=$1",
             chunk_id,
         )
@@ -604,6 +775,173 @@ async def create_chunk(doc_id: str, body: ChunkUpsert):
                 product_line,
             )
         return {"chunk_id": chunk_id, "doc_id": doc_id}
+    finally:
+        await _release_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Chunks — cross-document listing & bulk import
+# (export is registered above get_chunk so the literal path wins over {chunk_id})
+# ---------------------------------------------------------------------------
+
+@router.get("/chunks")
+async def list_all_chunks(doc_id: str = "", keyword: str = "", limit: int = 50, offset: int = 0):
+    """List chunks across all documents, optionally filtered by doc_id or keyword."""
+    conn = await _get_conn()
+    try:
+        conditions = ["(c.effective_to IS NULL OR c.effective_to > now())"]
+        args: list = []
+        idx = 1
+
+        if doc_id:
+            conditions.append(f"c.doc_id=${idx}")
+            args.append(doc_id)
+            idx += 1
+        if keyword:
+            conditions.append(f"(c.content ILIKE ${idx} OR c.title ILIKE ${idx} OR c.breadcrumb ILIKE ${idx})")
+            args.append(f"%{keyword}%")
+            idx += 1
+
+        where = "WHERE " + " AND ".join(conditions)
+        rows = await conn.fetch(
+            f"SELECT c.chunk_id, c.doc_id, d.title AS doc_title,"
+            f" c.title, c.breadcrumb, c.content, c.version,"
+            f" c.source_url, c.acl, c.region, c.product_line,"
+            f" c.effective_from, c.effective_to, c.updated_at"
+            f" FROM chunks c"
+            f" JOIN documents d ON d.doc_id = c.doc_id"
+            f" {where}"
+            f" ORDER BY c.updated_at DESC"
+            f" LIMIT ${idx} OFFSET ${idx + 1}",
+            *args, limit, offset,
+        )
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM chunks c {where}", *args
+        )
+        return {"chunks": [dict(r) for r in rows], "total": total}
+    except Exception:
+        logger.exception("list_all_chunks failed")
+        raise HTTPException(status_code=500, detail="Failed to list chunks")
+    finally:
+        await _release_conn(conn)
+
+
+def _parse_chunk_file(text: str, filename: str) -> list[dict]:
+    """Parse a JSONL or CSV file into chunk dicts. CSV must have a 'content' column."""
+    ext = (filename or "").rsplit(".", 1)[-1].lower()
+    if ext == "csv":
+        reader = csv.DictReader(io.StringIO(text))
+        items: list[dict] = []
+        for row_num, row in enumerate(reader, 2):
+            content = row.get("content", "").strip()
+            if not content:
+                raise HTTPException(status_code=422, detail=f"Missing 'content' at row {row_num}")
+            items.append({k: v.strip() for k, v in row.items()})
+        return items
+    # Default: JSONL
+    items = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail=f"Invalid JSON at line {lineno}")
+        if not obj.get("content", "").strip():
+            raise HTTPException(status_code=422, detail=f"Missing 'content' at line {lineno}")
+        items.append(obj)
+    return items
+
+
+@router.post("/chunks/import", status_code=201)
+async def import_chunks_jsonl(
+    file: UploadFile = File(...),
+    doc_id: str = "",
+    doc_title: str = "",
+):
+    """Bulk-import chunks from a JSONL or CSV file.
+
+    JSONL: {"title": "...", "breadcrumb": "...", "content": "...", "version": "1.0"}
+    CSV:   columns title,breadcrumb,content,version (content required)
+
+    Supply doc_id to append to an existing document, or doc_title to create a new one.
+    """
+    if not doc_id and not doc_title:
+        raise HTTPException(status_code=422, detail="Either doc_id or doc_title is required")
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=422, detail="File must be UTF-8 encoded")
+
+    items = _parse_chunk_file(text, file.filename or "")
+
+    if not items:
+        raise HTTPException(status_code=422, detail="No valid items found in file")
+
+    conn = await _get_conn()
+    try:
+        # Resolve or create the target document
+        if doc_id:
+            row = await conn.fetchrow("SELECT doc_id FROM documents WHERE doc_id=$1", doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+            target_doc_id = doc_id
+        else:
+            target_doc_id = f"doc_{int(_time.time() * 1000)}"
+            await conn.execute(
+                "INSERT INTO documents(doc_id, title, owner_email, business_line, status, updated_at)"
+                " VALUES($1, $2, 'import', 'default', 'active', now())",
+                target_doc_id, doc_title.strip(),
+            )
+
+        from inference.embedding import embed
+        from pgvector.asyncpg import register_vector
+        await register_vector(conn)
+
+        group_rows = await conn.fetch(
+            "SELECT group_id FROM document_groups WHERE doc_id=$1", target_doc_id
+        )
+        product_line = [r["group_id"] for r in group_rows] or ["global"]
+
+        ts = int(_time.time() * 1000)
+        for i, item in enumerate(items):
+            chunk_id = f"{target_doc_id}#import_{ts}_{i:04d}"
+            content = item["content"].strip()
+            embedding = None
+            try:
+                vecs = embed([content])
+                embedding = vecs[0].dense
+            except Exception:
+                pass
+
+            if embedding is not None:
+                await conn.execute(
+                    "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
+                    " version, product_line, embedding, updated_at)"
+                    " VALUES($1, $2, $3, $4, $5, $6, $7, $8, now())",
+                    chunk_id, target_doc_id,
+                    item.get("title", ""), item.get("breadcrumb", ""),
+                    content, item.get("version"),
+                    product_line, embedding,
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO chunks(chunk_id, doc_id, title, breadcrumb, content,"
+                    " version, product_line, updated_at)"
+                    " VALUES($1, $2, $3, $4, $5, $6, $7, now())",
+                    chunk_id, target_doc_id,
+                    item.get("title", ""), item.get("breadcrumb", ""),
+                    content, item.get("version"),
+                    product_line,
+                )
+
+        return {
+            "doc_id": target_doc_id,
+            "imported": len(items),
+        }
     finally:
         await _release_conn(conn)
 
