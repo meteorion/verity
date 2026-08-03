@@ -1,7 +1,11 @@
 import { useState } from 'react'
 
-export default function ComplaintForm({ sessionId }) {
-  const [form, setForm] = useState({ content: '', contact: '', order_id: '' })
+export default function ComplaintForm({ sessionId, prefill = {} }) {
+  const [form, setForm] = useState({
+    content:  prefill.detail || prefill.summary || '',
+    contact:  prefill.contact || '',
+    order_id: prefill.order_id || '',
+  })
   const [done, setDone] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')

@@ -12,6 +12,7 @@ import Analytics from './pages/Analytics.jsx'
 import ModelConfig from './pages/ModelConfig.jsx'
 import Users from './pages/Users.jsx'
 import Tickets from './pages/Tickets.jsx'
+import TicketLinks from './pages/TicketLinks.jsx'
 import TicketNew from './pages/TicketNew.jsx'
 
 const PAGES = {
@@ -22,6 +23,7 @@ const PAGES = {
   sessions: { title: '会话监控', desc: '实时会话审计与异常追踪', Comp: Sessions },
   analytics: { title: '数据统计', desc: '检索/生成/端到端指标看板', Comp: Analytics },
   tickets: { title: '工单管理', desc: '客服工单查看、状态更新与转派', Comp: Tickets },
+  ticket_links: { title: '工单链接配置', desc: '各工单类型的表单链接与启用状态管理', Comp: TicketLinks },
   config: { title: '模型/参数配置', desc: 'Provider 切换、阈值与 Prompt 版本管理', Comp: ModelConfig },
   users: { title: '用户与权限', desc: '角色与知识 ACL 管理', Comp: Users }
 }

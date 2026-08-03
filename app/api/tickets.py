@@ -57,11 +57,17 @@ async def api_create_ticket(req: CreateTicketRequest):
 
 @router.get("/link")
 async def api_ticket_link(type: str, session: str | None = None):
+    from tickets.link_service import get_link_config
     ticket_type = type if type in _VALID_TYPES else "inquiry"
+    cfg = await get_link_config(ticket_type)
+    if cfg and cfg.get("enabled") and cfg.get("form_url"):
+        base = cfg["form_url"]
+    else:
+        base = f"{_ADMIN_UI_BASE}/tickets/new"
     params = f"type={ticket_type}"
     if session:
         params += f"&session={session}"
-    return {"url": f"{_ADMIN_UI_BASE}/tickets/new?{params}"}
+    return {"url": f"{base}?{params}"}
 
 
 @router.get("", dependencies=[Depends(require_admin)])

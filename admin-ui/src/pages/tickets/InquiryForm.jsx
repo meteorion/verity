@@ -1,7 +1,10 @@
 import { useState } from 'react'
 
-export default function InquiryForm({ sessionId }) {
-  const [form, setForm] = useState({ description: '', contact: '' })
+export default function InquiryForm({ sessionId, prefill = {} }) {
+  const [form, setForm] = useState({
+    description: prefill.detail || prefill.summary || '',
+    contact:     prefill.contact || '',
+  })
   const [done, setDone] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')

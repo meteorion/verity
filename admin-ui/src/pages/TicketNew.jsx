@@ -17,10 +17,20 @@ const TYPE_LABELS = {
   technical_issue:    '技术问题',
 }
 
+function parsePrefill(raw) {
+  if (!raw) return {}
+  try {
+    return JSON.parse(atob(raw))
+  } catch {
+    return {}
+  }
+}
+
 export default function TicketNew() {
   const params = new URLSearchParams(window.location.search)
   const type = params.get('type') || 'inquiry'
   const sessionId = params.get('session') || null
+  const prefill = parsePrefill(params.get('prefill'))
   const Form = FORM_MAP[type] ?? InquiryForm
   const label = TYPE_LABELS[type] ?? '提交工单'
 
@@ -32,8 +42,11 @@ export default function TicketNew() {
           <p className="text-sm text-slate-400 mt-0.5">
             填写表单后提交，客服将尽快与您联系
           </p>
+          {Object.keys(prefill).length > 0 && (
+            <p className="text-xs text-indigo-400 mt-1">部分信息已由 AI 预填，请核对后提交</p>
+          )}
         </div>
-        <Form sessionId={sessionId} />
+        <Form sessionId={sessionId} prefill={prefill} />
       </div>
     </div>
   )

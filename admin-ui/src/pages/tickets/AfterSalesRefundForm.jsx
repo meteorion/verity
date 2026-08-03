@@ -1,7 +1,12 @@
 import { useState } from 'react'
 
-export default function AfterSalesRefundForm({ sessionId }) {
-  const [form, setForm] = useState({ order_id: '', description: '', contact: '', expected_refund: '' })
+export default function AfterSalesRefundForm({ sessionId, prefill = {} }) {
+  const [form, setForm] = useState({
+    order_id:        prefill.order_id || '',
+    description:     prefill.detail || prefill.summary || '',
+    contact:         prefill.contact || '',
+    expected_refund: prefill.amount != null ? String(prefill.amount) : '',
+  })
   const [done, setDone] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')

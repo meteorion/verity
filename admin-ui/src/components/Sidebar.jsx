@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { key: 'sessions', label: '会话监控', icon: 'activity' },
   { key: 'analytics', label: '数据统计', icon: 'chart' },
   { key: 'tickets', label: '工单管理', icon: 'inbox' },
+  { key: 'ticket_links', label: '工单链接配置', icon: 'link' },
   { key: 'config', label: '模型/参数配置', icon: 'sliders' },
   { key: 'users', label: '用户与权限', icon: 'users' }
 ]
