@@ -102,14 +102,16 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-async def _check_cache(vec: list[float]) -> dict | None:
+async def _check_cache(vec: list[float], *, roles: list[str], region: str, project_group: str | None) -> dict | None:
     try:
         import redis.asyncio as aioredis
         rc = aioredis.from_url(_REDIS_URL, decode_responses=True)
+        acl_sig = _acl_signature(roles, region, project_group)
+        key_prefix = f"semantic_cache:{acl_sig}:"
         async with rc:
             cursor, best_score, best_entry = 0, 0.0, None
             while True:
-                cursor, keys = await rc.scan(cursor=cursor, match="semantic_cache:*", count=200)
+                cursor, keys = await rc.scan(cursor=cursor, match=f"{key_prefix}*", count=200)
                 for key in keys:
                     raw = await rc.get(key)
                     if not raw:
@@ -117,6 +119,9 @@ async def _check_cache(vec: list[float]) -> dict | None:
                     try:
                         entry = json.loads(raw)
                     except Exception:
+                        continue
+                    # Defense-in-depth re-check of ACL scope even though the key prefix isolates it.
+                    if entry.get("acl_sig") != acl_sig:
                         continue
                     ev = entry.get("embedding")
                     if not ev:
@@ -127,28 +132,52 @@ async def _check_cache(vec: list[float]) -> dict | None:
                 if cursor == 0:
                     break
         if best_score >= _CACHE_THRESHOLD and best_entry:
-            logger.info("Semantic cache HIT (cosine=%.3f)", best_score)
+            logger.info("Semantic cache HIT (cosine=%.3f, scope=%s)", best_score, acl_sig)
             return best_entry
     except Exception as exc:
         logger.debug("Semantic cache check error: %s", exc)
     return None
 
 
-async def write_cache(query: str, vec: list[float], answer: str, refs: list[dict]) -> None:
-    """Write a cache entry; called fire-and-forget from generate_node."""
+def _acl_signature(roles: list[str], region: str, project_group: str | None) -> str:
+    """Short deterministic tag for the ACL scope used to namespace cache keys."""
+    parts = [
+        ",".join(sorted(set(roles)) if roles else ""),
+        region or "",
+        project_group or "",
+    ]
+    return hashlib.sha256("||".join(parts).encode()).hexdigest()[:10]
+
+
+async def write_cache(query: str, vec: list[float], answer: str, refs: list[dict],
+                      *, roles: list[str], region: str, project_group: str | None) -> None:
+    """Write a cache entry scoped to the caller's ACL (roles/region/project_group).
+
+    Called fire-and-forget from generate_node. The cache key is namespaced by
+    an ACL signature so one tenant's answers can never leak to another tenant,
+    and the entry itself stores the same signature for a re-read safety check.
+    """
     if not answer:
         return
     try:
         import redis.asyncio as aioredis
-        key = f"semantic_cache:{hashlib.sha256(query.encode()).hexdigest()[:16]}"
+        acl_sig = _acl_signature(roles, region, project_group)
+        q_hash = hashlib.sha256(query.encode()).hexdigest()[:16]
+        key = f"semantic_cache:{acl_sig}:{q_hash}"
         payload = json.dumps(
-            {"query": query, "embedding": vec, "answer": answer, "refs": refs},
+            {
+                "query": query,
+                "embedding": vec,
+                "answer": answer,
+                "refs": refs,
+                "acl_sig": acl_sig,
+            },
             ensure_ascii=False,
         )
         rc = aioredis.from_url(_REDIS_URL, decode_responses=True)
         async with rc:
             await rc.set(key, payload, ex=_CACHE_TTL)
-        logger.debug("Semantic cache WRITE key=%s", key)
+        logger.debug("Semantic cache WRITE key=%s scope=%s", key, acl_sig)
     except Exception as exc:
         logger.debug("Semantic cache write error: %s", exc)
 
@@ -196,13 +225,18 @@ async def rewrite_node(state: OrchestratorState) -> dict:
     history = state.get("history_recent") or []
     intent = state.get("intent")
 
+    # ACL scope used to namespace the semantic cache (prevents cross-tenant leak).
+    roles = list(state.get("roles") or [])
+    region = state.get("region") or "default"
+    project_group = state.get("project_group")
+
     # Embed query (dense only; sparse not needed for cache/rewrite)
     from inference import embedding as emb_mod
     embed_results = await asyncio.to_thread(emb_mod.embed, [query], mode="dense")
     vec: list[float] = embed_results[0].dense
 
-    # 1. Semantic cache
-    cached = await _check_cache(vec)
+    # 1. Semantic cache — namespaced by roles/region/project_group
+    cached = await _check_cache(vec, roles=roles, region=region, project_group=project_group)
     if cached:
         # Restore refs so chat.py can emit [REFS] for citation markers in the answer.
         # Old cache entries have "chunk_ids" (list[str]); new entries have "refs" (list[dict]).

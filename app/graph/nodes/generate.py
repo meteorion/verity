@@ -132,14 +132,22 @@ async def generate_node(state: OrchestratorState) -> dict:
             nli_check(answer, [c.get("content", "") for c in chunks])
         )
 
-    # Write to semantic cache asynchronously so it benefits future identical queries
+    # Write to semantic cache asynchronously so it benefits future identical queries.
+    # Scope the write by ACL (roles/region/project_group) so it can never be served
+    # to a different tenant or privilege level.
     vec = state.get("query_embedding")
     if vec and chunks and answer:
         from graph.nodes.rewrite import write_cache
         query_for_cache = state.get("query_rewritten") or state["query_raw"]
         _ref_keys = ("chunk_id", "title", "breadcrumb", "source_url", "doc_id")
         cache_refs = [{k: c.get(k, "") for k in _ref_keys} for c in chunks]
-        asyncio.create_task(write_cache(query_for_cache, vec, answer, cache_refs))
+        _roles = list(state.get("roles") or [])
+        _region = state.get("region") or "default"
+        _pg = state.get("project_group")
+        asyncio.create_task(
+            write_cache(query_for_cache, vec, answer, cache_refs,
+                        roles=_roles, region=_region, project_group=_pg)
+        )
 
     return {"answer_stream": answer, "nli_flags": []}
 

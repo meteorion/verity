@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import time as _time
 from pathlib import Path
@@ -18,9 +19,36 @@ from db import get_pool
 
 logger = logging.getLogger(__name__)
 
-_STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag"))
+_STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag")).resolve()
+_DOC_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 router = APIRouter(prefix="/api/ops")
+
+
+def _safe_storage_dir(doc_id: str) -> Path:
+    """Return the raw storage dir for doc_id; raises 400 on traversal / disallowed chars."""
+    if not doc_id or not _DOC_ID_RE.match(doc_id):
+        raise HTTPException(
+            status_code=400,
+            detail="doc_id 只能包含字母、数字、下划线、连字符和点",
+        )
+    raw_dir = (_STORAGE_ROOT / "raw" / doc_id).resolve()
+    # Must be exactly one level under _STORAGE_ROOT/raw — rejects ".", "..", or
+    # any symlink-resolved escape outside the directory tree.
+    expected_parent = (_STORAGE_ROOT / "raw").resolve()
+    if raw_dir.parent != expected_parent:
+        raise HTTPException(status_code=400, detail="doc_id 非法")
+    return raw_dir
+
+
+def _safe_file_in_dir(raw_dir: Path, filename: str) -> Path:
+    safe_name = Path(filename).name
+    if not safe_name or safe_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="文件名非法")
+    raw_file = (raw_dir / safe_name).resolve()
+    if str(raw_file.parent) != str(raw_dir):
+        raise HTTPException(status_code=400, detail="文件名非法")
+    return raw_file
 
 
 async def _get_conn() -> asyncpg.pool.PoolConnectionProxy:
@@ -118,15 +146,15 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
     finally:
         await _release_conn(conn)
 
-    raw_dir = _STORAGE_ROOT / "raw" / doc_id
+    raw_dir = _safe_storage_dir(doc_id)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     if file is not None:
         # Replace stored source with the newly uploaded file
         for old in raw_dir.iterdir():
-            if old.is_file():
+            if old.is_file() and old.resolve().parent == raw_dir:
                 old.unlink()
-        source_file = raw_dir / file.filename
+        source_file = _safe_file_in_dir(raw_dir, file.filename)
         with source_file.open("wb") as f:
             shutil.copyfileobj(file.file, f)
     else:

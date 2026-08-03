@@ -1,9 +1,10 @@
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, Form
+from fastapi import APIRouter, HTTPException, UploadFile, Form
 
 from db import get_pool
 from pipeline.models import Document
@@ -13,7 +14,8 @@ from pipeline.embedder import embed_chunks
 from pipeline.indexer import index_chunks
 
 router = APIRouter(prefix="/api/pipeline")
-_STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag"))
+_STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag")).resolve()
+_DOC_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 
 def _parse_dt(s: str) -> datetime | None:
@@ -23,6 +25,34 @@ def _parse_dt(s: str) -> datetime | None:
         return datetime.fromisoformat(s.strip())
     except (ValueError, TypeError):
         return None
+
+
+def _safe_storage_path(doc_id: str, filename: str | None = None) -> tuple[Path, Path | None]:
+    """Return (raw_dir, raw_file) paths that are guaranteed to be inside _STORAGE_ROOT.
+
+    Raises HTTPException(400) on doc_id containing traversal segments or
+    disallowed characters, or on filename attempting to escape the directory.
+    """
+    if not doc_id or not _DOC_ID_RE.match(doc_id):
+        raise HTTPException(
+            status_code=400,
+            detail="doc_id 只能包含字母、数字、下划线、连字符和点",
+        )
+    raw_dir = (_STORAGE_ROOT / "raw" / doc_id).resolve()
+    # The resolved raw_dir must still be exactly one level under _STORAGE_ROOT/raw —
+    # catches "." collapsing to the parent dir, ".." escaping, or symlink jumps.
+    expected_parent = (_STORAGE_ROOT / "raw").resolve()
+    if raw_dir.parent != expected_parent:
+        raise HTTPException(status_code=400, detail="doc_id 非法")
+    if filename is None:
+        return raw_dir, None
+    safe_name = Path(filename).name  # basename only — strips any directory components
+    if not safe_name or safe_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="文件名非法")
+    raw_file = (raw_dir / safe_name).resolve()
+    if str(raw_file.parent) != str(raw_dir):
+        raise HTTPException(status_code=400, detail="文件名非法")
+    return raw_dir, raw_file
 
 
 @router.post("/ingest")
@@ -43,8 +73,9 @@ async def ingest(
     chunk_size: int = Form(0),
     chunk_overlap: int = Form(0),
 ):
-    raw_path = _STORAGE_ROOT / "raw" / doc_id / file.filename
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_dir, raw_path = _safe_storage_path(doc_id, file.filename)
+    assert raw_path is not None
+    raw_dir.mkdir(parents=True, exist_ok=True)
     with raw_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 

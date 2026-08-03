@@ -12,6 +12,7 @@ Password storage: PBKDF2-SHA256 with 16-byte random salt, 260 000 iterations.
 No new dependencies — python-jose is already in pyproject.toml.
 """
 import hashlib
+import logging
 import os
 import secrets
 import time
@@ -25,8 +26,37 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-_SECRET = os.getenv("JWT_SECRET", "changeme-jwt-secret")
-_ALGO = os.getenv("JWT_ALGORITHM", "HS256")
+_ALLOWED_ALGOS = {"HS256", "HS384", "HS512"}
+_algo_input = os.getenv("JWT_ALGORITHM", "HS256")
+if _algo_input not in _ALLOWED_ALGOS:
+    # Guard against "none" / RS256 config mistakes that silently enable token forgery.
+    raise RuntimeError(
+        f"JWT_ALGORITHM={_algo_input!r} is not in allowed set {sorted(_ALLOWED_ALGOS)!r}; "
+        "refusing to start."
+    )
+_ALGO = _algo_input
+
+_secret_input = os.getenv("JWT_SECRET")
+if not _secret_input:
+    # No env var set — refuse to ship with the well-known hardcoded default.
+    # Generate an ephemeral random secret instead; warn loudly because tokens
+    # will be invalidated on every process restart.
+    _secret_input = secrets.token_hex(32)
+    logger = logging.getLogger(__name__)
+    logger.critical(
+        "JWT_SECRET env var is NOT SET. Generated ephemeral secret at startup; "
+        "ALL tokens will be INVALIDATED on every process restart. Set JWT_SECRET "
+        "to a persistent high-entropy value in production."
+    )
+elif _secret_input in {"changeme", "changeme-jwt-secret"}:
+    # Deployer left the placeholder string — refuse it outright rather than
+    # silently allowing anyone with source access to forge admin tokens.
+    raise RuntimeError(
+        "JWT_SECRET is still set to the placeholder value 'changeme-jwt-secret'; "
+        "refusing to start. Set a high-entropy secret via environment."
+    )
+_SECRET = _secret_input
+
 _TTL = 8 * 3600  # 8 hours
 
 _bearer = HTTPBearer(auto_error=False)
@@ -61,12 +91,42 @@ def _verify_password(password: str, stored: str) -> bool:
 def _seed():
     if not _users:
         uid = "user_admin"
+        admin_email = os.getenv("ADMIN_EMAIL")
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+
+        if not admin_email:
+            admin_email = "admin@verity.local"
+            _auth_logger = logging.getLogger(__name__)
+            _auth_logger.warning(
+                "ADMIN_EMAIL not set; using default %r (please configure for production).",
+                admin_email,
+            )
+        else:
+            admin_email = admin_email.strip()
+
+        if not admin_pw or admin_pw in {"admin123", "changeme", "password", ""}:
+            # Generate a one-time strong password printed at startup so the
+            # operator is forced to change / configure the env var.
+            admin_pw = secrets.token_urlsafe(14)
+            print(
+                "\n"
+                "================================================================\n"
+                "ADMIN PASSWORD NOT CONFIGURED (or still using the default).\n"
+                f"Generated ONE-TIME admin password for {admin_email!r}:\n"
+                f"    {admin_pw}\n"
+                "Store this value in ADMIN_PASSWORD env var to make it persist\n"
+                "across restarts. The password above is valid ONLY for the\n"
+                "current running process.\n"
+                "================================================================",
+                flush=True,
+            )
+
         _users[uid] = {
             "uid": uid,
             "name": "管理员",
-            "email": os.getenv("ADMIN_EMAIL", "admin@verity.local"),
+            "email": admin_email,
             "roles": ["admin"],
-            "password_hash": _hash_password(os.getenv("ADMIN_PASSWORD", "admin123")),
+            "password_hash": _hash_password(admin_pw),
             "disabled": False,
             "created_at": time.time(),
             "last_login": None,
