@@ -43,6 +43,16 @@ CREATE TABLE IF NOT EXISTS project_groups (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
+-- Built-in default group: documents/chunks fall back to this when no group is
+-- assigned (see documents.group_ids / chunks.product_line defaults above), and
+-- delete_group() refuses to delete it — so it must always exist.
+INSERT INTO project_groups(group_id, name, description) VALUES
+    ('global', '全局', '系统内置默认项目组，覆盖未指定项目组的文档'),
+    ('shouyintong', '收银通', ''),
+    ('saas', 'SaaS', ''),
+    ('lianhe_shoudan', '联合收单', '')
+    ON CONFLICT (group_id) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id        TEXT PRIMARY KEY,
     doc_id          TEXT NOT NULL,
