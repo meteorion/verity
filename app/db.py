@@ -4,6 +4,7 @@ P1 用幂等 DDL（CREATE ... IF NOT EXISTS）代替迁移框架——规模和�
 换 Embedding 模型（改变向量维度）或引入稀疏向量（P2 混合检索）时，这份 DDL 需要手动 ALTER
 或删表重建，不会自动迁移。
 """
+import asyncio
 import os
 
 import asyncpg
@@ -287,14 +288,19 @@ async def get_connection() -> asyncpg.Connection:
 # ---------------------------------------------------------------------------
 
 _pool: asyncpg.Pool | None = None
+_pool_lock = asyncio.Lock()
 
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(_DSN, min_size=2, max_size=10)
-        async with _pool.acquire() as conn:
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    if _pool is not None:
+        return _pool
+    async with _pool_lock:
+        if _pool is None:
+            pool = await asyncpg.create_pool(_DSN, min_size=2, max_size=10)
+            async with pool.acquire() as conn:
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            _pool = pool
     return _pool
 
 

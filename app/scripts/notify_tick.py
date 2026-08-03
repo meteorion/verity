@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx  # noqa: E402
-from db import get_pool  # noqa: E402
+from db import close_pool, get_pool  # noqa: E402
 from tickets.config import (  # noqa: E402
     ASSIGNMENT,
     CLOSE_AFTER_HOURS,
@@ -32,12 +32,15 @@ logger = logging.getLogger(__name__)
 
 
 async def run():
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await notify_open(conn)
-        await escalate_stale(conn)
-        await auto_close(conn)
-    logger.info("Tick complete")
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await notify_open(conn)
+            await escalate_stale(conn)
+            await auto_close(conn)
+        logger.info("Tick complete")
+    finally:
+        await close_pool()
 
 
 async def notify_open(conn):
