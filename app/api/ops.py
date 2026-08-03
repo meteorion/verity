@@ -575,72 +575,94 @@ async def list_chunks(doc_id: str):
         await _release_conn(conn)
 
 
-_EXPORT_FIELDS = ["chunk_id", "doc_id", "doc_title", "title", "breadcrumb",
-                  "content", "version", "source_url", "effective_from", "effective_to"]
+_EXPORT_FIELDS = [
+    "chunk_id", "doc_id", "doc_title", "title", "breadcrumb", "content",
+    "version", "source_url", "effective_from", "effective_to",
+    "product_line", "category", "tags", "is_parent", "chunk_index",
+]
 
 
 @router.get("/chunks/export")
 async def export_chunks(doc_id: str = "", keyword: str = "", format: str = "csv"):
-    """Export all matching chunks as CSV or JSONL (no pagination)."""
-    conn = await _get_conn()
-    try:
-        conditions = ["(c.effective_to IS NULL OR c.effective_to > now())"]
-        args: list = []
-        idx = 1
-        if doc_id:
-            conditions.append(f"c.doc_id=${idx}")
-            args.append(doc_id)
-            idx += 1
-        if keyword:
-            conditions.append(
-                f"(c.content ILIKE ${idx} OR c.title ILIKE ${idx} OR c.breadcrumb ILIKE ${idx})"
-            )
-            args.append(f"%{keyword}%")
-            idx += 1
+    """Export all matching chunks as CSV or JSONL, streamed row by row."""
+    if format not in ("csv", "jsonl"):
+        raise HTTPException(status_code=400, detail="format 必须为 csv 或 jsonl")
 
-        where = "WHERE " + " AND ".join(conditions)
-        rows = await conn.fetch(
-            f"SELECT c.chunk_id, c.doc_id, d.title AS doc_title,"
-            f" c.title, c.breadcrumb, c.content, c.version,"
-            f" c.source_url, c.effective_from, c.effective_to"
-            f" FROM chunks c"
-            f" JOIN documents d ON d.doc_id = c.doc_id"
-            f" {where}"
-            f" ORDER BY c.doc_id, c.updated_at DESC",
-            *args,
+    conditions = ["(c.effective_to IS NULL OR c.effective_to > now())"]
+    args: list = []
+    idx = 1
+    if doc_id:
+        conditions.append(f"c.doc_id=${idx}")
+        args.append(doc_id)
+        idx += 1
+    if keyword:
+        # Escape ILIKE metacharacters so user input is treated as literals.
+        escaped = keyword.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        conditions.append(
+            f"(c.content ILIKE ${idx} ESCAPE '!'"
+            f" OR c.title ILIKE ${idx} ESCAPE '!'"
+            f" OR c.breadcrumb ILIKE ${idx} ESCAPE '!')"
         )
-    finally:
-        await _release_conn(conn)
+        args.append(f"%{escaped}%")
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+    query = (
+        f"SELECT c.chunk_id, c.doc_id, d.title AS doc_title,"
+        f" c.title, c.breadcrumb, c.content, c.version,"
+        f" c.source_url, c.effective_from, c.effective_to,"
+        f" c.product_line, c.category, c.tags, c.is_parent, c.chunk_index"
+        f" FROM chunks c"
+        f" JOIN documents d ON d.doc_id = c.doc_id"
+        f" {where}"
+        f" ORDER BY c.doc_id, c.chunk_index ASC"
+    )
 
     def _str(v):
         if v is None:
             return ""
         if hasattr(v, "isoformat"):
             return v.isoformat()
+        if isinstance(v, list):
+            return json.dumps(v, ensure_ascii=False)
         return str(v)
 
+    pool = await get_pool()
+
     if format == "csv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=_EXPORT_FIELDS, lineterminator="\n")
-        writer.writeheader()
-        for r in rows:
-            writer.writerow({f: _str(dict(r).get(f)) for f in _EXPORT_FIELDS})
-        content = buf.getvalue()
+        async def generate():
+            header = io.StringIO()
+            csv.DictWriter(header, fieldnames=_EXPORT_FIELDS, lineterminator="\n").writeheader()
+            yield header.getvalue().encode("utf-8")
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    async for row in conn.cursor(query, *args):
+                        buf = io.StringIO()
+                        csv.DictWriter(buf, fieldnames=_EXPORT_FIELDS, lineterminator="\n").writerow(
+                            {f: _str(dict(row).get(f)) for f in _EXPORT_FIELDS}
+                        )
+                        yield buf.getvalue().encode("utf-8")
         media_type = "text/csv"
         suffix = "csv"
     else:
-        lines = []
-        for r in rows:
-            lines.append(json.dumps({f: _str(dict(r).get(f)) for f in _EXPORT_FIELDS}, ensure_ascii=False))
-        content = "\n".join(lines)
+        async def generate():
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    async for row in conn.cursor(query, *args):
+                        yield (
+                            json.dumps(
+                                {f: _str(dict(row).get(f)) for f in _EXPORT_FIELDS},
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        ).encode("utf-8")
         media_type = "application/x-ndjson"
         suffix = "jsonl"
 
-    filename = f"chunks_export.{suffix}"
     return StreamingResponse(
-        iter([content.encode("utf-8")]),
+        generate(),
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="chunks_export.{suffix}"'},
     )
 
 
