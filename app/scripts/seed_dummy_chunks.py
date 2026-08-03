@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from inference.embedding import embed, load_embedding_model  # noqa: E402
 from pipeline.indexer import index_chunks  # noqa: E402
+from pipeline.models import Chunk  # noqa: E402
 
 _DUMMY_CHUNKS = [
     {
@@ -40,7 +41,7 @@ _DUMMY_CHUNKS = [
 async def main() -> None:
     load_embedding_model()
     vecs = embed([c["content"] for c in _DUMMY_CHUNKS], mode="dense")
-    chunks = [{**c, "embedding": v.dense} for c, v in zip(_DUMMY_CHUNKS, vecs)]
+    chunks = [Chunk(**c, embedding=v.dense) for c, v in zip(_DUMMY_CHUNKS, vecs)]
     await index_chunks(chunks)
     print(f"写入 {len(chunks)} 条 dummy chunk")
 
