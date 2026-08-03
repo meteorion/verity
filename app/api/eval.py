@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import logging
+import math
 import os
 import time
 from typing import List
@@ -26,6 +27,20 @@ from db import get_pool
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/eval")
+
+
+def _json_safe(value):
+    """Recursively replace NaN/Infinity with None — Ragas emits float('nan') for
+    metrics it can't score (e.g. after an upstream API error), and Python's
+    json.dumps happily writes that as a bare `NaN` token, which Postgres's
+    jsonb parser then rejects."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 async def _get_conn() -> asyncpg.pool.PoolConnectionProxy:
@@ -452,12 +467,12 @@ async def _do_eval(
     await conn.execute(
         "INSERT INTO eval_records("
         "  record_id, dataset_id, item_id, batch_record_id,"
-        "  run_type, query, question, answer, contexts, ground_truth,"
+        "  run_type, question, answer, contexts, ground_truth,"
         "  retrieved_chunk_ids, top_k, retrieval_ms, latency_ms, ragas_metrics"
-        ") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+        ") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
         record_id, dataset_id, item_id, batch_record_id,
-        run_type, question, question, answer, contexts, ground_truth,
-        retrieved_ids, top_k, retrieval_ms, latency_ms, json.dumps(ragas_scores),
+        run_type, question, answer, contexts, ground_truth,
+        retrieved_ids, top_k, retrieval_ms, latency_ms, json.dumps(_json_safe(ragas_scores)),
     )
 
     return {
@@ -471,7 +486,7 @@ async def _do_eval(
         "retrieved_count": len(retrieved_ids),
         "retrieval_ms": retrieval_ms,
         "latency_ms": latency_ms,
-        "ragas_metrics": ragas_scores,
+        "ragas_metrics": _json_safe(ragas_scores),
     }
 
 
@@ -616,7 +631,9 @@ async def _run_batch_background(
             vals = [
                 r["ragas_metrics"].get(key)
                 for r in results
-                if isinstance(r.get("ragas_metrics"), dict) and r["ragas_metrics"].get(key) is not None
+                if isinstance(r.get("ragas_metrics"), dict)
+                and isinstance(r["ragas_metrics"].get(key), (int, float))
+                and math.isfinite(r["ragas_metrics"][key])
             ]
             if vals:
                 aggregate[key] = round(sum(vals) / len(vals), 4)
@@ -629,12 +646,12 @@ async def _run_batch_background(
             " SET status='completed', completed_items=$2,"
             "     aggregate_metrics=$3, completed_at=now()"
             " WHERE batch_record_id=$1",
-            batch_record_id, completed, json.dumps({
+            batch_record_id, completed, json.dumps(_json_safe({
                 "aggregate_ragas_metrics": aggregate,
                 "avg_latency_ms": avg_latency,
                 "total_items": len(items),
                 "success_items": len(results),
-            }),
+            })),
         )
     except Exception:
         logger.exception("Batch run %s failed", batch_record_id)
