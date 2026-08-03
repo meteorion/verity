@@ -55,7 +55,12 @@ def _parse_sections(markdown: str) -> list[tuple[int, str, str]]:
 
 
 def _build_breadcrumb(doc_title: str, heading_stack: list[str]) -> str:
-    parts = [doc_title] + [h for h in heading_stack if h]
+    """Join doc_title with the heading stack, skipping entries that repeat the
+    immediately preceding part (e.g. an H1 that restates the doc title)."""
+    parts = [doc_title]
+    for h in heading_stack:
+        if h and h != parts[-1]:
+            parts.append(h)
     return " > ".join(parts)
 
 
@@ -134,7 +139,7 @@ async def chunk_document(
 
         breadcrumb = _build_breadcrumb(doc_title, heading_stack)
         section_title = heading_text if heading_text else doc_title
-        parent_chunk_id = f"{doc_id}#{section_idx:03d}_parent"
+        parent_chunk_id = f"{doc.doc_id}#{section_idx:03d}_parent"
 
         if not body:
             continue
@@ -160,7 +165,7 @@ async def chunk_document(
             # Small section — single retrieval chunk, no parent row needed.
             # Prefix with breadcrumb for embedding consistency with sub-chunks.
             all_chunks.append(Chunk(
-                chunk_id=f"{doc_id}#{section_idx:03d}_000",
+                chunk_id=f"{doc.doc_id}#{section_idx:03d}_000",
                 parent_chunk_id=None,
                 content=f"{breadcrumb}:\n{body}",
                 chunk_index=0,
@@ -183,7 +188,7 @@ async def chunk_document(
             sub_texts = _split_by_paragraphs(body, breadcrumb_line, effective_chunk_size, effective_chunk_overlap)
             for chunk_idx, content in enumerate(sub_texts):
                 all_chunks.append(Chunk(
-                    chunk_id=f"{doc_id}#{section_idx:03d}_{chunk_idx:03d}",
+                    chunk_id=f"{doc.doc_id}#{section_idx:03d}_{chunk_idx:03d}",
                     parent_chunk_id=parent_chunk_id,
                     content=content,
                     chunk_index=chunk_idx,
