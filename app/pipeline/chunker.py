@@ -109,6 +109,7 @@ def _split_by_paragraphs(
 async def chunk_document(
     parsed: dict[str, Any],
     doc: Document,
+    dry_run: bool = False,
 ) -> list[Chunk]:
     markdown: str = parsed.get("markdown", "")
     doc_title: str = parsed.get("metadata", {}).get("title", doc.doc_id)
@@ -203,7 +204,7 @@ async def chunk_document(
     )
 
     # Upsert the document row so downstream indexer can update its status/score.
-    if os.environ.get("PGVECTOR_DSN", ""):
+    if not dry_run and os.environ.get("PGVECTOR_DSN", ""):
         pool = await get_pool()
         await pool.execute(
             """

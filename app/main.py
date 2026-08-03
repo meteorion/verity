@@ -16,6 +16,8 @@ from api.sessions import router as sessions_router
 from api.eval import router as eval_router
 from api.settings import router as settings_router
 from api.tickets import router as tickets_router
+from api.ticket_links import router as ticket_links_router
+from api.tools import router as tools_router
 from inference.embedding import load_embedding_model
 from inference.rerank import load_rerank_model
 from inference.nli import load_nli_model
@@ -67,6 +69,32 @@ async def _run_migrations():
                 )
                 logger.info("Seeded initial prompt version v1.0.0 from %s", prompt_path)
             logger.info("DB migration: prompt_versions table ensured")
+
+            # ticket_link_configs: per-type form URL managed via admin UI
+            await conn.execute(
+                """CREATE TABLE IF NOT EXISTS ticket_link_configs (
+                    ticket_type  TEXT PRIMARY KEY,
+                    label        TEXT NOT NULL,
+                    form_url     TEXT NOT NULL,
+                    enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+                    sort_order   INT NOT NULL DEFAULT 0,
+                    updated_at   TIMESTAMPTZ DEFAULT now()
+                )"""
+            )
+            admin_base = os.getenv("ADMIN_UI_BASE_URL", "http://localhost:5173")
+            default_url = f"{admin_base}/tickets/new"
+            for ticket_type, label, sort_order in [
+                ("after_sales_refund", "售后退款", 0),
+                ("complaint",          "投诉建议", 1),
+                ("inquiry",            "咨询问题", 2),
+                ("technical_issue",    "技术问题", 3),
+            ]:
+                await conn.execute(
+                    "INSERT INTO ticket_link_configs (ticket_type, label, form_url, sort_order)"
+                    " VALUES ($1, $2, $3, $4) ON CONFLICT (ticket_type) DO NOTHING",
+                    ticket_type, label, default_url, sort_order,
+                )
+            logger.info("DB migration: ticket_link_configs table ensured")
         finally:
             await conn.close()
     except Exception:
@@ -127,6 +155,8 @@ app.include_router(settings_router, dependencies=_admin)
 # tickets: POST /api/tickets 和 GET /api/tickets/link 为用户公开端点；
 # 其余管理端点由 api/tickets.py 内部通过 require_admin 依赖保护。
 app.include_router(tickets_router)
+app.include_router(ticket_links_router, dependencies=_admin)
+app.include_router(tools_router, dependencies=_admin)
 
 
 @app.get("/health")
