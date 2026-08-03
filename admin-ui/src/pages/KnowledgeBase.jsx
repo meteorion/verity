@@ -605,7 +605,8 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
     return <div className="w-96 shrink-0 border-l border-slate-100 p-4 text-sm text-slate-400">选择左侧文档查看详情</div>
   }
   return (
-    <div className="w-96 shrink-0 border-l border-slate-100 p-4 text-sm space-y-3 overflow-y-auto max-h-[520px]">
+    <div className="w-96 shrink-0 border-l border-slate-100 flex flex-col max-h-[520px]">
+      <div className="flex-1 overflow-y-auto p-4 text-sm space-y-3">
       <div>
         <p className="font-medium text-slate-800">{doc.title}</p>
         <p className="text-xs text-slate-400 mt-0.5">{doc.doc_id}</p>
@@ -685,7 +686,9 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
         </div>
       </div>
 
-      <div className="pt-2 flex gap-2 flex-wrap">
+    </div>
+
+      <div className="shrink-0 border-t border-slate-100 p-4 pb-6 flex gap-2 flex-wrap bg-white">
         <Button size="sm" onClick={() => setShowEdit(true)}>编辑</Button>
         <Button size="sm" variant="primary" className="w-20" disabled={saving} onClick={() => setShowRebuild(true)}>重构</Button>
         {doc.status !== 'rejected' && (
