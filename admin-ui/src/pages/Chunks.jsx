@@ -58,6 +58,7 @@ export default function Chunks() {
   const [viewingChunk, setViewingChunk] = useState(null)   // null | chunk object
   const [editingChunk, setEditingChunk] = useState(null)   // null | chunk object | 'new'
   const [showImport, setShowImport] = useState(false)
+  const [groups, setGroups] = useState([])
 
   const loadDocuments = useCallback(async () => {
     try {
@@ -68,6 +69,21 @@ export default function Chunks() {
       }
     } catch { /* ignore */ }
   }, [])
+
+  const loadGroups = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/ops/groups')
+      if (res.ok) {
+        const data = await res.json()
+        setGroups(data.groups ?? [])
+      }
+    } catch { /* ignore */ }
+  }, [])
+
+  const groupLabels = useMemo(
+    () => Object.fromEntries(groups.map((g) => [g.group_id, g.name])),
+    [groups],
+  )
 
   const loadChunks = useCallback(async () => {
     setLoading(true)
@@ -92,6 +108,7 @@ export default function Chunks() {
   }, [docFilter, keyword, page])
 
   useEffect(() => { loadDocuments() }, [loadDocuments])
+  useEffect(() => { loadGroups() }, [loadGroups])
   useEffect(() => { setPage(0) }, [docFilter, keyword])
   useEffect(() => { loadChunks() }, [loadChunks])
 
@@ -341,6 +358,7 @@ export default function Chunks() {
       {viewingChunk && (
         <ChunkDetailDrawer
           chunk={viewingChunk}
+          groupLabels={groupLabels}
           onClose={() => setViewingChunk(null)}
           onEdit={() => { setEditingChunk(viewingChunk); setViewingChunk(null) }}
           onDelete={() => deleteChunk(viewingChunk.chunk_id)}
@@ -397,7 +415,7 @@ function TagList({ label, items }) {
 
 
 
-function ChunkDetailDrawer({ chunk, onClose, onEdit, onDelete }) {
+function ChunkDetailDrawer({ chunk, groupLabels, onClose, onEdit, onDelete }) {
   return (
     <>
       {/* Backdrop */}
@@ -455,7 +473,7 @@ function ChunkDetailDrawer({ chunk, onClose, onEdit, onDelete }) {
             <div>
               <TagList label="ACL" items={chunk.acl} />
               <TagList label="地区" items={chunk.region} />
-              <TagList label="产品线" items={chunk.product_line} />
+              <TagList label="产品线" items={chunk.product_line?.map((id) => groupLabels?.[id] || id)} />
             </div>
             {!chunk.acl?.length && !chunk.region?.length && !chunk.product_line?.length && (
               <p className="text-xs text-slate-300">（公开访问，无访问控制）</p>
