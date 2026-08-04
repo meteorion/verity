@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
 import QuestionsPanel from '../components/QuestionsPanel.jsx'
+import { MD_COMPONENTS } from '../components/mdComponents.jsx'
 import { apiFetch } from '../auth.js'
 
 const DOC_TYPE_OPTIONS = [
@@ -58,6 +59,8 @@ export default function Chunks() {
   const [viewingChunk, setViewingChunk] = useState(null)   // null | chunk object
   const [editingChunk, setEditingChunk] = useState(null)   // null | chunk object | 'new'
   const [showImport, setShowImport] = useState(false)
+  const [showGenerate, setShowGenerate] = useState(false)
+  const [generated, setGenerated] = useState(null)         // null | { chunks, download }
   const [groups, setGroups] = useState([])
 
   const loadDocuments = useCallback(async () => {
@@ -244,6 +247,10 @@ export default function Chunks() {
               </div>
             )}
           </div>
+          <Button size="sm" onClick={() => setShowGenerate(true)}>
+            <Icon name="layers" size={14} />
+            生成预览
+          </Button>
           <Button size="sm" onClick={() => setShowImport(true)}>
             <Icon name="upload" size={14} />
             导入
@@ -381,6 +388,20 @@ export default function Chunks() {
           documents={documents}
           onClose={() => setShowImport(false)}
           onSuccess={() => { setShowImport(false); loadChunks(); loadDocuments() }}
+        />
+      )}
+
+      {showGenerate && (
+        <GenerateModal
+          onClose={() => setShowGenerate(false)}
+          onGenerated={(result) => { setShowGenerate(false); setGenerated(result) }}
+        />
+      )}
+
+      {generated && (
+        <GeneratePreviewModal
+          result={generated}
+          onClose={() => setGenerated(null)}
         />
       )}
     </div>
@@ -916,6 +937,287 @@ function ImportModal({ documents, onClose, onSuccess }) {
           <Button size="sm" variant="primary" onClick={handleSubmit} disabled={importing}>
             {importing ? '导入中…' : '开始导入'}
           </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Generate Preview (chunk-export 工具：解析+分块，不入库) ──────────────────
+
+function GenerateModal({ onClose, onGenerated }) {
+  const [file, setFile] = useState(null)
+  const [docId, setDocId] = useState('')
+  const [docType, setDocType] = useState('')
+  const [category, setCategory] = useState('')
+  const [sourceUrl, setSourceUrl] = useState('')
+  const [productLine, setProductLine] = useState('global')
+  const [acl, setAcl] = useState('role:public')
+  const [version, setVersion] = useState('')
+  const [effectiveFrom, setEffectiveFrom] = useState('')
+  const [effectiveTo, setEffectiveTo] = useState('')
+  const [tags, setTags] = useState([])
+  const [chunkSize, setChunkSize] = useState('')
+  const [chunkOverlap, setChunkOverlap] = useState('')
+  const [useLlmStructure, setUseLlmStructure] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [error, setError] = useState(null)
+
+  function buildFormData(fmt) {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('format', fmt)
+    if (docId.trim()) fd.append('doc_id', docId.trim())
+    if (docType) fd.append('doc_type', docType)
+    if (category) fd.append('category', category)
+    if (sourceUrl.trim()) fd.append('source_url', sourceUrl.trim())
+    fd.append('product_line', productLine.trim() || 'global')
+    fd.append('acl', acl.trim() || 'role:public')
+    if (version.trim()) fd.append('version', version.trim())
+    if (effectiveFrom) fd.append('effective_from', effectiveFrom)
+    if (effectiveTo) fd.append('effective_to', effectiveTo)
+    if (tags.length) fd.append('tags', tags.join(','))
+    if (chunkSize) fd.append('chunk_size', chunkSize)
+    if (chunkOverlap) fd.append('chunk_overlap', chunkOverlap)
+    fd.append('use_llm_structure', useLlmStructure ? 'true' : 'false')
+    return fd
+  }
+
+  async function download(fmt) {
+    const res = await apiFetch('/api/tools/chunk-export', { method: 'POST', body: buildFormData(fmt) })
+    if (!res.ok) throw new Error(await res.text())
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `chunks_preview.${fmt}`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function handleSubmit() {
+    if (!file) { setError('请选择文件'); return }
+    setGenerating(true)
+    setError(null)
+    try {
+      const res = await apiFetch('/api/tools/chunk-export', { method: 'POST', body: buildFormData('json') })
+      if (!res.ok) {
+        const d = await res.json().catch(() => null)
+        throw new Error(d?.detail || await res.text())
+      }
+      const chunks = await res.json()
+      onGenerated({ chunks, download })
+    } catch (e) {
+      setError(e.message)
+      setGenerating(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 shrink-0">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">生成 Chunks 预览</h3>
+            <p className="text-xs text-slate-400 mt-0.5">解析 + 切分，不写入数据库，供入库前校对质量</p>
+          </div>
+          <button onClick={onClose} disabled={generating} className="text-slate-400 hover:text-slate-600">
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+          <label className="block border-2 border-dashed border-slate-200 rounded-lg py-10 text-center text-slate-400 text-sm cursor-pointer hover:border-indigo-200 hover:bg-slate-50/50 transition-colors">
+            <Icon name="upload" size={20} className="mx-auto mb-2" />
+            {file ? (
+              <span className="text-slate-700 font-medium">{file.name}</span>
+            ) : (
+              <>拖拽文件到此处，或点击选择</>
+            )}
+            <p className="text-xs mt-1 text-slate-300">支持 PDF / Word / Markdown，单文件 ≤ 10MB</p>
+            <input
+              type="file"
+              className="hidden"
+              accept=".pdf,.docx,.doc,.md,.txt"
+              onChange={(e) => setFile(e.target.files[0] ?? null)}
+            />
+          </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <FieldLabel>文档 ID</FieldLabel>
+              <TextInput value={docId} onChange={setDocId} placeholder="留空则用文件名自动生成" mono />
+            </div>
+            <div>
+              <FieldLabel>版本</FieldLabel>
+              <TextInput value={version} onChange={setVersion} placeholder="如 1.0、2.1" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <FieldLabel>文档类型</FieldLabel>
+              <Select value={docType} onChange={setDocType} options={DOC_TYPE_OPTIONS} className="w-full mt-1" size="sm" />
+            </div>
+            <div>
+              <FieldLabel>分类</FieldLabel>
+              <Select value={category} onChange={setCategory} options={CATEGORY_OPTIONS} className="w-full mt-1" size="sm" />
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>来源 URL</FieldLabel>
+            <TextInput value={sourceUrl} onChange={setSourceUrl} placeholder="https://..." mono />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <FieldLabel>产品线（逗号分隔）</FieldLabel>
+              <TextInput value={productLine} onChange={setProductLine} placeholder="global" mono />
+            </div>
+            <div>
+              <FieldLabel>ACL（逗号分隔）</FieldLabel>
+              <TextInput value={acl} onChange={setAcl} placeholder="role:public" mono />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <FieldLabel>生效日期</FieldLabel>
+              <input type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs" />
+            </div>
+            <div>
+              <FieldLabel>失效日期</FieldLabel>
+              <input type="date" value={effectiveTo} onChange={(e) => setEffectiveTo(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <FieldLabel>切分大小 <span className="text-slate-300">tokens</span></FieldLabel>
+              <input type="number" min="100" max="4000" value={chunkSize} onChange={(e) => setChunkSize(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-sm" placeholder="默认" />
+            </div>
+            <div>
+              <FieldLabel>重叠大小 <span className="text-slate-300">tokens</span></FieldLabel>
+              <input type="number" min="0" max="500" value={chunkOverlap} onChange={(e) => setChunkOverlap(e.target.value)}
+                className="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-sm" placeholder="默认" />
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>标签</FieldLabel>
+            <TagPills selected={tags} options={TAG_PRESETS} onChange={setTags} />
+          </div>
+
+          <label className="flex items-start gap-2 text-xs text-slate-500 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={useLlmStructure}
+              onChange={(e) => setUseLlmStructure(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              使用 LLM 结构化文档（适合扫描件 OCR 结果、格式混乱或无标题的长文本）
+              <br />
+              <span className="text-slate-400">会增加 3–10 秒延迟，超长文档（&gt; 3000 tokens 原文）效果不稳定</span>
+            </span>
+          </label>
+
+          {error && <p className="text-xs text-red-500">{error}</p>}
+        </div>
+
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100 shrink-0">
+          <Button size="sm" onClick={onClose} disabled={generating}>取消</Button>
+          <Button size="sm" variant="primary" onClick={handleSubmit} disabled={generating}>
+            {generating ? '生成中…' : '开始生成'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function GeneratePreviewModal({ result, onClose }) {
+  const { chunks, download } = result
+  const [downloading, setDownloading] = useState(null) // null | 'json' | 'csv'
+  const parentCount = chunks.filter((c) => c.is_parent).length
+
+  async function handleDownload(fmt) {
+    setDownloading(fmt)
+    try {
+      await download(fmt)
+    } catch (e) {
+      alert(`下载失败：${e.message}`)
+    } finally {
+      setDownloading(null)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl w-full max-w-4xl flex flex-col" style={{ maxHeight: '85vh' }}>
+        <div className="flex items-start justify-between px-6 py-4 border-b border-slate-100 shrink-0">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">生成结果预览</h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              共 {chunks.length} 个 chunk{parentCount > 0 ? `（含 ${parentCount} 个父级）` : ''} · 未写入数据库
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 ml-4">
+            <Button size="sm" onClick={() => handleDownload('json')} disabled={downloading !== null}>
+              <Icon name="download" size={13} />
+              {downloading === 'json' ? '下载中…' : 'JSON'}
+            </Button>
+            <Button size="sm" onClick={() => handleDownload('csv')} disabled={downloading !== null}>
+              <Icon name="download" size={13} />
+              {downloading === 'csv' ? '下载中…' : 'CSV'}
+            </Button>
+            <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+              <Icon name="x" size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-amber-50 text-amber-700 text-xs px-6 py-2 shrink-0">
+          此结果仅供预览校对，未写入数据库。确认无误后，请到「知识库管理」正式上传该文档完成入库。
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-3">
+          {chunks.length === 0 && (
+            <p className="text-xs text-slate-400 text-center py-12">未生成任何 chunk</p>
+          )}
+          {chunks.map((c, idx) => (
+            <div key={c.chunk_id} className="border border-slate-100 rounded-xl p-4">
+              <div className="flex items-start gap-4">
+                <span className="text-xs text-slate-300 font-mono w-6 shrink-0 pt-0.5 text-right">{idx + 1}</span>
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {(c.breadcrumb || c.title) && (
+                      <p className="text-xs font-medium text-slate-600">{c.breadcrumb || c.title}</p>
+                    )}
+                    {c.is_parent && <Badge tone="slate">父级</Badge>}
+                    {c.doc_type && <Badge tone="blue">{DOC_TYPE_LABEL[c.doc_type] || c.doc_type}</Badge>}
+                    {c.category && <Badge tone="purple">{CATEGORY_LABEL[c.category] || c.category}</Badge>}
+                  </div>
+                  <div className="text-xs text-slate-700 leading-relaxed bg-slate-50 rounded-lg px-3 py-2 mt-1">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+                      {c.content ?? ''}
+                    </ReactMarkdown>
+                  </div>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <p className="text-[11px] text-slate-300 font-mono">{c.chunk_id}</p>
+                    <span className="text-[11px] text-slate-400">~{c.tokens_est} tokens</span>
+                    {c.tags?.length > 0 && (
+                      <span className="text-[11px] text-slate-400">{c.tags.join(', ')}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>

@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from pipeline.chunker import chunk_document
@@ -91,20 +91,20 @@ def _format_response(chunks: list[Chunk], fmt: str) -> Response:
 @router.post("/chunk-export")
 async def chunk_export(
     file: UploadFile,
-    format: Literal["json", "csv"] = "json",
-    chunk_size: int | None = None,
-    chunk_overlap: int | None = None,
-    use_llm_structure: bool = False,
-    doc_id: str | None = None,
-    doc_type: str | None = None,
-    category: str | None = None,
-    source_url: str | None = None,
-    product_line: str = "global",
-    acl: str = "role:public",
-    version: str | None = None,
-    effective_from: str | None = None,
-    effective_to: str | None = None,
-    tags: str | None = None,
+    format: Literal["json", "csv"] = Form("json"),
+    chunk_size: int | None = Form(None),
+    chunk_overlap: int | None = Form(None),
+    use_llm_structure: bool = Form(False),
+    doc_id: str | None = Form(None),
+    doc_type: str | None = Form(None),
+    category: str | None = Form(None),
+    source_url: str | None = Form(None),
+    product_line: str = Form("global"),
+    acl: str = Form("role:public"),
+    version: str | None = Form(None),
+    effective_from: str | None = Form(None),
+    effective_to: str | None = Form(None),
+    tags: str | None = Form(None),
 ):
     """Parse an uploaded document into chunks and return without writing to the DB."""
     raw = await file.read()
