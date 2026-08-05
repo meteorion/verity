@@ -566,6 +566,7 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
   const [showRebuild, setShowRebuild] = useState(false)
   const [showChunks, setShowChunks] = useState(false)
   const [showAdmission, setShowAdmission] = useState(false)
+  const [showSource, setShowSource] = useState(false)
   const docGroupIds = doc?.group_ids ?? []
   const docAcl = doc?.acl ?? ['role:public']
 
@@ -689,6 +690,7 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
     </div>
 
       <div className="shrink-0 border-t border-slate-100 p-4 pb-6 flex gap-2 flex-wrap bg-white">
+        <Button size="sm" onClick={() => setShowSource(true)}>查看原文</Button>
         <Button size="sm" onClick={() => setShowEdit(true)}>编辑</Button>
         <Button size="sm" variant="primary" className="w-20" disabled={saving} onClick={() => setShowRebuild(true)}>重构</Button>
         {doc.status !== 'rejected' && (
@@ -719,6 +721,10 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
 
       {showAdmission && (
         <AdmissionModal doc={doc} onClose={() => setShowAdmission(false)} />
+      )}
+
+      {showSource && (
+        <SourceModal doc={doc} onClose={() => setShowSource(false)} />
       )}
     </div>
   )
@@ -1010,6 +1016,72 @@ function RebuildModal({ doc, onClose, onRebuild }) {
           <Button size="sm" variant="primary" onClick={handleSubmit} disabled={rebuilding}>
             {rebuilding ? '重构中…' : '开始重构'}
           </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SourceModal({ doc, onClose }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    apiFetch(`/api/ops/documents/${doc.doc_id}/source`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then((d) => { setData(d); setLoading(false) })
+      .catch((e) => { setError(e.message); setLoading(false) })
+  }, [doc.doc_id])
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl w-full max-w-5xl flex flex-col" style={{ maxHeight: '90vh' }}>
+        <div className="flex items-start justify-between px-6 py-4 border-b border-slate-100 shrink-0">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">知识库原文</h3>
+            <p className="text-xs text-slate-400 mt-0.5 truncate max-w-lg">{doc.title} · {doc.doc_id}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-8">
+          {loading && (
+            <p className="text-xs text-slate-400 text-center py-12">加载中…</p>
+          )}
+          {error && (
+            <p className="text-xs text-rose-500 text-center py-12">加载失败：{error}</p>
+          )}
+          {!loading && !error && (
+            <div className="text-sm text-slate-700 leading-relaxed max-w-3xl mx-auto">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  h1: ({ ...p }) => <h1 className="text-xl font-bold text-slate-900 mb-3 mt-6 first:mt-0 pb-2 border-b border-slate-200" {...p} />,
+                  h2: ({ ...p }) => <h2 className="text-lg font-semibold text-slate-900 mb-2.5 mt-5 first:mt-0" {...p} />,
+                  h3: ({ ...p }) => <h3 className="text-base font-semibold text-slate-800 mb-2 mt-4 first:mt-0" {...p} />,
+                  h4: ({ ...p }) => <h4 className="text-sm font-semibold text-slate-800 mb-1.5 mt-3 first:mt-0" {...p} />,
+                  h5: ({ ...p }) => <h5 className="text-sm font-semibold text-slate-700 mb-1.5 mt-3 first:mt-0" {...p} />,
+                  h6: ({ ...p }) => <h6 className="text-sm font-semibold text-slate-700 mb-1.5 mt-3 first:mt-0" {...p} />,
+                  p: ({ ...p }) => <p className="mb-3 last:mb-0" {...p} />,
+                  ul: ({ ...p }) => <ul className="list-disc list-inside mb-3 space-y-1" {...p} />,
+                  ol: ({ ...p }) => <ol className="list-decimal list-inside mb-3 space-y-1" {...p} />,
+                  code: ({ ...p }) => <code className="bg-slate-100 rounded px-1 font-mono text-xs" {...p} />,
+                  pre: ({ ...p }) => <pre className="bg-slate-100 rounded p-3 font-mono text-xs overflow-x-auto my-3" {...p} />,
+                  a: ({ ...p }) => <span className="text-indigo-500 underline" {...p} />,
+                  table: ({ ...p }) => <div className="overflow-x-auto my-3"><table className="text-xs border-collapse w-full" {...p} /></div>,
+                  th: ({ ...p }) => <th className="border border-slate-200 px-2 py-1.5 bg-slate-100 font-semibold text-left" {...p} />,
+                  td: ({ ...p }) => <td className="border border-slate-200 px-2 py-1.5" {...p} />,
+                }}
+              >
+                {data?.markdown ?? ''}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
       </div>
     </div>

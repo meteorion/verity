@@ -183,6 +183,54 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
     }
 
 
+@router.get("/documents/{doc_id}/source")
+async def get_document_source(doc_id: str):
+    """Return the original document's full text, re-parsed from its stored source file.
+
+    Reuses the same on-disk source resolution as `rebuild_document` but performs
+    no writes — parsing is transient, purely for display.
+    """
+    conn = await _get_conn()
+    try:
+        doc = await conn.fetchrow(
+            "SELECT title, source_path FROM documents WHERE doc_id=$1",
+            doc_id,
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        stored_source_path: str | None = doc["source_path"]
+    finally:
+        await _release_conn(conn)
+
+    source_file = None
+    if stored_source_path:
+        candidate = Path(stored_source_path)
+        if candidate.exists():
+            source_file = candidate
+    if source_file is None:
+        raw_dir = _STORAGE_ROOT / "raw" / doc_id
+        if raw_dir.is_dir():
+            existing = [f for f in raw_dir.iterdir() if f.is_file()]
+            if existing:
+                source_file = existing[0]
+    if source_file is None:
+        raise HTTPException(status_code=404, detail="Source file not found on disk")
+
+    from pipeline.parser import parse_document
+
+    try:
+        parsed = await parse_document(source_file)
+    except ValueError as e:
+        raise HTTPException(status_code=415, detail=str(e))
+
+    return {
+        "doc_id": doc_id,
+        "title": doc["title"],
+        "format": parsed.get("format"),
+        "markdown": parsed.get("markdown", ""),
+    }
+
+
 @router.post("/documents/{doc_id}/disable")
 async def disable_document(doc_id: str):
     conn = await _get_conn()
