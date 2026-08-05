@@ -137,6 +137,61 @@ async def get_settings():
     )
 
 
+_DEFAULT_BASIC_CONFIG = {
+    "doc_types": [
+        {"value": "faq",          "label": "FAQ"},
+        {"value": "manual",       "label": "操作手册"},
+        {"value": "policy",       "label": "政策说明"},
+        {"value": "announcement", "label": "公告"},
+        {"value": "other",        "label": "其他"},
+    ],
+    "categories": [
+        {"value": "product",     "label": "产品"},
+        {"value": "after_sales", "label": "售后"},
+        {"value": "complaint",   "label": "投诉"},
+        {"value": "inquiry",     "label": "咨询"},
+        {"value": "general",     "label": "通用"},
+    ],
+    "tag_presets": ["高优", "紧急", "外部", "常见问题", "VIP", "退款", "发货", "会员"],
+    "groups": [
+        {"value": "global",    "label": "全局"},
+        {"value": "saas",      "label": "SAAS"},
+        {"value": "cashier",   "label": "收银通"},
+        {"value": "joint_acq", "label": "联合收单"},
+    ],
+}
+
+
+class BasicConfigWrite(BaseModel):
+    doc_types: Optional[list] = None
+    categories: Optional[list] = None
+    tag_presets: Optional[list] = None
+    groups: Optional[list] = None
+
+
+@router.get("/basic-config")
+async def get_basic_config():
+    s = load_settings()
+    bc = s.get("basic_config", {})
+    return {
+        "doc_types":   bc.get("doc_types",   _DEFAULT_BASIC_CONFIG["doc_types"]),
+        "categories":  bc.get("categories",  _DEFAULT_BASIC_CONFIG["categories"]),
+        "tag_presets": bc.get("tag_presets", _DEFAULT_BASIC_CONFIG["tag_presets"]),
+        "groups":      bc.get("groups",      _DEFAULT_BASIC_CONFIG["groups"]),
+    }
+
+
+@router.put("/basic-config", status_code=204)
+async def update_basic_config(body: BasicConfigWrite):
+    s = load_settings()
+    bc = s.get("basic_config", {})
+    updates = body.model_dump(exclude_none=True)
+    bc.update(updates)
+    s["basic_config"] = bc
+    save_settings(s)
+    logger.info("Basic config saved. Fields: %s", list(updates.keys()))
+
+
 @router.put("", status_code=204)
 async def update_settings(body: SettingsWrite):
     from eval.ragas_eval import reset_evaluator

@@ -348,10 +348,17 @@ function DatasetDetailView({ datasetId, onBack, onViewRecords }) {
         return
       }
       if (!res.ok) throw new Error(await res.text())
-      const { batch_record_id, total_items } = await res.json()
-      setActiveBatch({ id: batch_record_id, total: total_items, completed: 0, status: 'running' })
+      const { job_id, batch_record_id, total_items } = await res.json()
+      setActiveBatch({ id: batch_record_id, jobId: job_id, total: total_items, completed: 0, status: 'running' })
       setSelectedIds(new Set())
     } catch (e) { alert(`批量评估失败：${e.message}`) }
+  }
+
+  async function cancelBatch() {
+    if (!activeBatch?.jobId) return
+    try {
+      await apiFetch(`/api/jobs/${activeBatch.jobId}/cancel`, { method: 'POST' })
+    } catch { /* ignore */ }
   }
 
   useEffect(() => {
@@ -365,6 +372,7 @@ function DatasetDetailView({ datasetId, onBack, onViewRecords }) {
         } else {
           setActiveBatch(null)
           if (data.status === 'completed') setBatchResult(data)
+          else if (data.status === 'cancelled') { /* user cancelled — no alert */ }
           else alert(`批量评估失败：${data.error_msg || '未知错误'}`)
         }
       } catch (e) { /* network hiccup, retry next tick */ }
@@ -546,7 +554,7 @@ function DatasetDetailView({ datasetId, onBack, onViewRecords }) {
       )}
 
       {activeBatch && (
-        <div className="fixed bottom-6 right-6 z-40 bg-white rounded-xl shadow-lg border border-slate-200 px-5 py-4 flex items-center gap-4 min-w-[260px]">
+        <div className="fixed bottom-6 right-6 z-40 bg-white rounded-xl shadow-lg border border-slate-200 px-5 py-4 flex items-center gap-4 min-w-[280px]">
           <svg className="animate-spin text-indigo-500 shrink-0" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <path d="M21 12a9 9 0 1 1-6.2-8.6" />
           </svg>
@@ -560,6 +568,15 @@ function DatasetDetailView({ datasetId, onBack, onViewRecords }) {
             </div>
             <p className="text-[11px] text-slate-400 mt-1">{activeBatch.completed} / {activeBatch.total} 条完成</p>
           </div>
+          {activeBatch.jobId && (
+            <button
+              onClick={cancelBatch}
+              title="中断评估"
+              className="shrink-0 text-[11px] px-2.5 py-1 rounded-lg bg-red-50 text-red-500 hover:bg-red-100 transition-colors font-medium border border-red-100"
+            >
+              中断
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -789,12 +806,13 @@ function RecordsView({ onBack, backLabel = '返回数据集列表' }) {
               <thead>
                 <tr className="text-left text-xs text-slate-400 border-b border-slate-50 sticky top-0 bg-white">
                   <th className="px-3 py-2 w-[38%] font-medium">问题</th>
-                  <th className="px-2 py-2 w-20 font-medium text-center">CR</th>
-                  <th className="px-2 py-2 w-20 font-medium text-center">Faith</th>
-                  <th className="px-2 py-2 w-20 font-medium text-center">AR</th>
+                  <th className="px-2 py-2 w-16 font-medium text-center">CR</th>
+                  <th className="px-2 py-2 w-16 font-medium text-center">Faith</th>
+                  <th className="px-2 py-2 w-16 font-medium text-center">AR</th>
                   <th className="px-2 py-2 w-16 font-medium text-right" title="总耗时（检索+生成+指标）">耗时</th>
-                  <th className="px-2 py-2 w-32 font-medium">时间</th>
-                  <th className="px-2 py-2 w-16 font-medium">操作</th>
+                  <th className="px-2 py-2 w-20 font-medium">批次</th>
+                  <th className="px-2 py-2 w-28 font-medium">时间</th>
+                  <th className="px-2 py-2 w-14 font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -817,6 +835,14 @@ function RecordsView({ onBack, backLabel = '返回数据集列表' }) {
                         <MiniMetric value={m.answer_relevancy} />
                       </td>
                       <td className="px-2 py-2.5 text-xs text-slate-400 text-right">{rec.latency_ms}ms</td>
+                      <td className="px-2 py-2.5">
+                        {rec.batch_record_id
+                          ? <span className="font-mono text-[10px] text-indigo-400 bg-indigo-50 px-1.5 py-0.5 rounded" title={rec.batch_record_id}>
+                              {rec.batch_record_id.slice(-8)}
+                            </span>
+                          : <span className="text-[10px] text-slate-300">—</span>
+                        }
+                      </td>
                       <td className="px-2 py-2.5 text-xs text-slate-400">{fmtDate(rec.created_at)}</td>
                       <td className="px-2 py-2.5">
                         <Button size="sm" variant="ghost" onClick={() => setExpandedRecord(rec.record_id)}>

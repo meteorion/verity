@@ -1,9 +1,9 @@
-"""Tools API: stateless document utilities that produce output without writing to the DB."""
+"""Tools API: document utilities that produce output without writing to the DB."""
 import asyncio
-import csv
 import dataclasses
-import io
 import json
+import logging
+import os
 import re
 import tempfile
 from datetime import datetime
@@ -11,24 +11,20 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse
 
+from job_registry import create_job, mark_running, publish_progress
 from pipeline.chunker import chunk_document
 from pipeline.models import Chunk, Document
 from pipeline.parser import parse_document
 from pipeline.structurer import structure_with_llm
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tools")
 
 _MAX_BYTES = 10 * 1024 * 1024  # 10 MB
-_TIMEOUT_S = 55
-
-_CSV_FIELDS = [
-    "chunk_id", "doc_id", "chunk_index", "title", "breadcrumb", "content",
-    "tokens_est", "is_parent", "parent_chunk_id", "source_url",
-    "doc_type", "category", "product_line", "region", "acl",
-    "version", "effective_from", "effective_to", "tags", "updated_at",
-]
+_TIMEOUT_EXPORT_S = 300          # background export timeout
+_STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT", "/data/rag"))
 
 
 def _slugify(name: str) -> str:
@@ -52,46 +48,88 @@ def _chunk_to_dict(chunk: Chunk) -> dict:
     d.pop("embedding", None)
     d.pop("sparse_vector", None)
     d["tokens_est"] = len(chunk.content) // 3
-    for k, v in d.items():
-        if isinstance(v, datetime):
-            d[k] = v.isoformat()
+    for k in list(d.keys()):
+        if isinstance(d[k], datetime):
+            d[k] = d[k].isoformat()
     return d
 
 
-def _format_response(chunks: list[Chunk], fmt: str) -> Response:
-    rows = [_chunk_to_dict(c) for c in chunks]
+async def _run_chunk_export(
+    job_id: str,
+    raw: bytes,
+    file_suffix: str,
+    doc: Document,
+    filename: str,
+    fmt: str,
+    use_llm_structure: bool = False,
+) -> None:
+    export_dir = _STORAGE_ROOT / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_path = export_dir / f"{job_id}.{fmt}"
 
-    if fmt == "json":
-        return Response(
-            content=json.dumps(rows, ensure_ascii=False, indent=2).encode("utf-8"),
-            media_type="application/json",
-            headers={"Content-Disposition": 'attachment; filename="chunks.json"'},
+    try:
+        await mark_running(job_id)
+        await publish_progress(job_id, "running", 0, 3, "解析文档中…")
+
+        with tempfile.NamedTemporaryFile(suffix=file_suffix, delete=False) as tmp:
+            tmp.write(raw)
+            tmp_path = Path(tmp.name)
+        try:
+            parsed = await asyncio.wait_for(parse_document(tmp_path), timeout=_TIMEOUT_EXPORT_S)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        doc.title = parsed.get("metadata", {}).get("title", doc.doc_id)
+
+        if use_llm_structure:
+            await publish_progress(job_id, "running", 1, 4, "LLM 结构化中…")
+            result = await asyncio.wait_for(structure_with_llm(parsed["markdown"]), timeout=_TIMEOUT_EXPORT_S)
+            parsed["markdown"] = result.markdown
+            doc.doc_type = doc.doc_type or result.doc_type
+            doc.source_url = doc.source_url or result.source_url
+
+        total_phases = 4 if use_llm_structure else 3
+        await publish_progress(job_id, "running", total_phases - 2, total_phases, "切分中…")
+        chunks = await chunk_document(parsed, doc, dry_run=True)
+        retrieval_chunks = [c for c in chunks if not c.is_parent]
+
+        await publish_progress(job_id, "running", total_phases - 1, total_phases, "写文件…")
+        rows = [_chunk_to_dict(c) for c in chunks]
+        if fmt == "jsonl":
+            content = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n"
+        else:
+            content = json.dumps(rows, ensure_ascii=False, indent=2)
+
+        export_path.write_text(content, encoding="utf-8")
+        file_size = export_path.stat().st_size
+
+        await publish_progress(
+            job_id, "completed",
+            current=total_phases,
+            total=total_phases,
+            result_data={
+                "file_path": str(export_path),
+                "file_size_bytes": file_size,
+                "chunk_count": len(retrieval_chunks),
+                "format": fmt,
+                "filename": f"chunks_{doc.doc_id}.{fmt}",
+            },
         )
+        logger.info("Chunk export job %s completed: %d chunks → %s", job_id, len(retrieval_chunks), export_path.name)
 
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=_CSV_FIELDS, lineterminator="\n", extrasaction="ignore")
-    writer.writeheader()
-    for r in rows:
-        row = {}
-        for f in _CSV_FIELDS:
-            v = r.get(f)
-            if isinstance(v, list):
-                row[f] = json.dumps(v, ensure_ascii=False)
-            else:
-                row[f] = "" if v is None else v
-        writer.writerow(row)
-
-    return Response(
-        content=buf.getvalue().encode("utf-8"),
-        media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="chunks.csv"'},
-    )
+    except asyncio.TimeoutError:
+        export_path.unlink(missing_ok=True)
+        await publish_progress(job_id, "failed", error_message="处理超时，请减小文件或关闭 LLM 结构化")
+    except Exception as exc:
+        export_path.unlink(missing_ok=True)
+        logger.exception("Chunk export job %s failed", job_id)
+        await publish_progress(job_id, "failed", error_message=str(exc))
 
 
-@router.post("/chunk-export")
+@router.post("/chunk-export", status_code=202)
 async def chunk_export(
     file: UploadFile,
-    format: Literal["json", "csv"] = Form("json"),
+    format: Literal["json", "jsonl"] = Form("jsonl"),
     chunk_size: int | None = Form(None),
     chunk_overlap: int | None = Form(None),
     use_llm_structure: bool = Form(False),
@@ -106,55 +144,43 @@ async def chunk_export(
     effective_to: str | None = Form(None),
     tags: str | None = Form(None),
 ):
-    """Parse an uploaded document into chunks and return without writing to the DB."""
+    """Parse + chunk a document in the background; result downloadable via /api/jobs/{id}/download."""
     raw = await file.read()
     if len(raw) > _MAX_BYTES:
         raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
 
-    suffix = Path(file.filename or "file").suffix or ".txt"
+    file_suffix = Path(file.filename or "file").suffix or ".txt"
     _doc_id = doc_id or _slugify(Path(file.filename or "doc").stem)
+    filename = file.filename or "file"
 
-    async def _process() -> list[Chunk]:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(raw)
-            tmp_path = Path(tmp.name)
-        try:
-            parsed = await parse_document(tmp_path)
-        finally:
-            tmp_path.unlink(missing_ok=True)
+    doc = Document(
+        doc_id=_doc_id,
+        title=_doc_id,
+        owner_email="",
+        business_line="",
+        group_ids=_split_csv(product_line),
+        source_url=source_url,
+        doc_type=doc_type,
+        category=category,
+        acl=_split_csv(acl),
+        version=version,
+        effective_from=_parse_dt(effective_from),
+        effective_to=_parse_dt(effective_to),
+        tags=_split_csv(tags or ""),
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
 
-        _doc_type = doc_type
-        _source_url = source_url
-        if use_llm_structure:
-            result = await structure_with_llm(parsed["markdown"])
-            parsed["markdown"] = result.markdown
-            _doc_type = doc_type or result.doc_type
-            _source_url = source_url or result.source_url
+    job_id = await create_job(
+        job_type="chunk_export",
+        display_name=f"导出 {filename}",
+        ref_id=_doc_id,
+        created_by="admin",
+    )
 
-        doc = Document(
-            doc_id=_doc_id,
-            title=parsed["metadata"].get("title", _doc_id),
-            owner_email="",
-            business_line="",
-            group_ids=_split_csv(product_line),
-            source_url=_source_url,
-            doc_type=_doc_type,
-            category=category,
-            acl=_split_csv(acl),
-            version=version,
-            effective_from=_parse_dt(effective_from),
-            effective_to=_parse_dt(effective_to),
-            tags=_split_csv(tags or ""),
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-        return await chunk_document(parsed, doc, dry_run=True)
+    asyncio.create_task(_run_chunk_export(job_id, raw, file_suffix, doc, filename, format, use_llm_structure))
 
-    try:
-        chunks = await asyncio.wait_for(_process(), timeout=_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=503, detail="处理超时，请减小文件或关闭 use_llm_structure")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return _format_response(chunks, format)
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "doc_id": _doc_id, "status": "pending"},
+    )

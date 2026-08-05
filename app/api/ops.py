@@ -256,7 +256,6 @@ async def disable_document(doc_id: str):
 class DocUpdate(BaseModel):
     title: str | None = None
     owner_email: str | None = None
-    business_line: str | None = None
     version: str | None = None
     source_url: str | None = None
     effective_from: str | None = None
@@ -1196,20 +1195,31 @@ async def import_chunks_jsonl(
 # Prompt version management (source of truth: prompt_versions table)
 # ---------------------------------------------------------------------------
 
+PROMPT_TYPES = ["chat", "rewrite", "summary"]
+
+
 class PromptCreate(BaseModel):
     version: str
     note: str = ""
     content: str
+    prompt_type: str = "chat"
 
 
 @router.get("/prompts")
-async def list_prompts():
+async def list_prompts(prompt_type: str | None = None):
     conn = await _get_conn()
     try:
-        rows = await conn.fetch(
-            "SELECT version, note, created_at, is_active"
-            " FROM prompt_versions ORDER BY created_at DESC"
-        )
+        if prompt_type:
+            rows = await conn.fetch(
+                "SELECT version, note, created_at, is_active, prompt_type"
+                " FROM prompt_versions WHERE prompt_type=$1 ORDER BY created_at DESC",
+                prompt_type,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT version, note, created_at, is_active, prompt_type"
+                " FROM prompt_versions ORDER BY created_at DESC"
+            )
         return {"prompts": [dict(r) for r in rows]}
     except Exception:
         logger.exception("list_prompts failed")
@@ -1223,7 +1233,7 @@ async def get_prompt(version: str):
     conn = await _get_conn()
     try:
         row = await conn.fetchrow(
-            "SELECT version, content, note, created_at, is_active"
+            "SELECT version, content, note, created_at, is_active, prompt_type"
             " FROM prompt_versions WHERE version=$1",
             version,
         )
@@ -1240,13 +1250,14 @@ async def create_prompt(body: PromptCreate):
         raise HTTPException(status_code=422, detail="version is required")
     if not body.content.strip():
         raise HTTPException(status_code=422, detail="content is required")
+    pt = body.prompt_type.strip() or "chat"
     conn = await _get_conn()
     try:
         try:
             await conn.execute(
-                "INSERT INTO prompt_versions(version, content, note)"
-                " VALUES($1, $2, $3)",
-                body.version.strip(), body.content.strip(), body.note,
+                "INSERT INTO prompt_versions(version, content, note, prompt_type)"
+                " VALUES($1, $2, $3, $4)",
+                body.version.strip(), body.content.strip(), body.note, pt,
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail=f"Version '{body.version}' already exists")
@@ -1260,23 +1271,28 @@ async def activate_prompt(version: str):
     conn = await _get_conn()
     try:
         row = await conn.fetchrow(
-            "SELECT content FROM prompt_versions WHERE version=$1", version
+            "SELECT content, prompt_type FROM prompt_versions WHERE version=$1", version
         )
         if not row:
             raise HTTPException(status_code=404, detail=f"Version '{version}' not found")
         async with conn.transaction():
-            await conn.execute("UPDATE prompt_versions SET is_active=FALSE")
+            # Only deactivate versions of the same type
+            await conn.execute(
+                "UPDATE prompt_versions SET is_active=FALSE WHERE prompt_type=$1",
+                row["prompt_type"],
+            )
             await conn.execute(
                 "UPDATE prompt_versions SET is_active=TRUE WHERE version=$1", version
             )
     finally:
         await _release_conn(conn)
-    # Refresh Redis cache for instant hot-swap in generate_node (best-effort)
-    try:
-        import redis.asyncio as aioredis
-        rc = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
-        await rc.set("verity:prompt:active", row["content"])
-        await rc.aclose()
-    except Exception:
-        pass
+    # Refresh Redis cache for chat type (best-effort)
+    if row["prompt_type"] == "chat":
+        try:
+            import redis.asyncio as aioredis
+            rc = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+            await rc.set("verity:prompt:active", row["content"])
+            await rc.aclose()
+        except Exception:
+            pass
     return {"activated": version}

@@ -53,7 +53,7 @@ INSERT INTO project_groups(group_id, name, description) VALUES
     ('saas', 'SaaS', ''),
     ('lianhe_shoudan', '联合收单', '')
     ON CONFLICT (group_id) DO NOTHING;
-
+    
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id        TEXT PRIMARY KEY,
     doc_id          TEXT NOT NULL,
@@ -258,6 +258,29 @@ BEGIN
     ALTER TABLE chunks DROP COLUMN parent_path;
 EXCEPTION WHEN undefined_column THEN NULL;
 END $$;
+
+-- Background job registry: tracks all async operations (ingest / chunk_export / eval_batch)
+CREATE TABLE IF NOT EXISTS background_jobs (
+    job_id           TEXT        PRIMARY KEY,
+    job_type         TEXT        NOT NULL CHECK (job_type IN ('ingest', 'chunk_export', 'eval_batch')),
+    display_name     TEXT        NOT NULL,
+    status           TEXT        NOT NULL DEFAULT 'pending'
+                                 CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+    progress_current INT         DEFAULT 0,
+    progress_total   INT         DEFAULT 0,
+    progress_phase   TEXT,
+    result_data      JSONB,
+    error_message    TEXT,
+    cancel_requested BOOLEAN     DEFAULT FALSE,
+    ref_id           TEXT,
+    created_by       TEXT        NOT NULL DEFAULT 'system',
+    created_at       TIMESTAMPTZ DEFAULT now(),
+    started_at       TIMESTAMPTZ,
+    completed_at     TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON background_jobs (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_ref ON background_jobs (ref_id);
 """
 
 

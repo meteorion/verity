@@ -9,8 +9,8 @@ class Document:
     doc_id: str
     title: str
     owner_email: str
-    business_line: str
     group_ids: list[str] = field(default_factory=lambda: ["global"])
+    business_line: str = ""
     source_type: str = "upload"
     source_path: str | None = None
     source_url: str | None = None

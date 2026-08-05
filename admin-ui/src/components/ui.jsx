@@ -151,7 +151,7 @@ export function Button({ children, variant = 'default', size = 'md', className =
   }
   return (
     <button
-      className={`rounded-lg font-medium transition-colors inline-flex items-center gap-1.5 ${variants[variant]} ${sizes[size]} ${className}`}
+      className={`rounded-lg font-medium transition-colors inline-flex items-center justify-center gap-1.5 ${variants[variant]} ${sizes[size]} ${className}`}
       {...props}
     >
       {children}

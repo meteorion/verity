@@ -1,6 +1,9 @@
+import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import asyncpg
 from fastapi import Depends, FastAPI
@@ -17,6 +20,7 @@ from api.eval import router as eval_router
 from api.settings import router as settings_router
 from api.tickets import router as tickets_router
 from api.ticket_links import router as ticket_links_router
+from api.jobs import router as jobs_router
 from api.tools import router as tools_router
 from inference.embedding import load_embedding_model
 from inference.rerank import load_rerank_model
@@ -68,6 +72,10 @@ async def _run_migrations():
                     "v1.0.0", content, "初始版本",
                 )
                 logger.info("Seeded initial prompt version v1.0.0 from %s", prompt_path)
+            await conn.execute(
+                "ALTER TABLE prompt_versions ADD COLUMN IF NOT EXISTS"
+                " prompt_type TEXT NOT NULL DEFAULT 'chat'"
+            )
             logger.info("DB migration: prompt_versions table ensured")
 
             # ticket_link_configs: per-type form URL managed via admin UI
@@ -100,6 +108,69 @@ async def _run_migrations():
     except Exception:
         logger.exception("DB migration failed (non-fatal)")
 
+    # Reset jobs that were left in running/pending state from a previous process
+    try:
+        from job_registry import reset_orphaned_jobs
+        n = await reset_orphaned_jobs()
+        if n:
+            logger.warning("Reset %d orphaned background job(s) to 'failed'", n)
+    except Exception:
+        logger.exception("Failed to reset orphaned jobs (non-fatal)")
+
+    # Reset eval_batch_runs rows that are stuck in 'running' with no live background job.
+    # Covers: (a) pre-Phase-3 batches that used BackgroundTasks and were never migrated,
+    # (b) Phase-3 batches whose background_jobs entry was just reset above.
+    dsn = os.environ.get("PGVECTOR_DSN", "")
+    if dsn:
+        try:
+            import asyncpg as _apg
+            _conn = await _apg.connect(dsn)
+            try:
+                result = await _conn.execute(
+                    """UPDATE eval_batch_runs
+                          SET status   = 'failed',
+                              error_msg = '服务重启，任务中断'
+                        WHERE status = 'running'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM background_jobs bj
+                               WHERE bj.ref_id = eval_batch_runs.batch_record_id
+                                 AND bj.status IN ('pending', 'running')
+                          )"""
+                )
+                n2 = int(result.split()[-1])
+                if n2:
+                    logger.warning("Reset %d orphaned eval_batch_runs to 'failed'", n2)
+            finally:
+                await _conn.close()
+        except Exception:
+            logger.exception("Failed to reset orphaned eval_batch_runs (non-fatal)")
+
+    # Clean up chunk export files older than 24 h left from the previous run
+    _cleanup_old_exports()
+
+
+def _cleanup_old_exports() -> None:
+    exports_dir = Path(os.getenv("STORAGE_ROOT", "/data/rag")) / "exports"
+    if not exports_dir.exists():
+        return
+    cutoff = time.time() - 86_400
+    removed = 0
+    for f in exports_dir.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        logger.info("Removed %d expired export file(s)", removed)
+
+
+async def _periodic_export_cleanup() -> None:
+    while True:
+        await asyncio.sleep(3_600)
+        _cleanup_old_exports()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -111,6 +182,8 @@ async def lifespan(app: FastAPI):
     load_rerank_model()
     load_nli_model()
     logger.info("Building LangGraph orchestration graph …")
+
+    cleanup_task = asyncio.create_task(_periodic_export_cleanup())
 
     dsn = os.environ.get("PGVECTOR_DSN", "")
     if dsn:
@@ -126,6 +199,8 @@ async def lifespan(app: FastAPI):
         app.state.graph = _graph
         logger.info("Startup complete — graph ready (in-memory checkpointer)")
         yield
+
+    cleanup_task.cancel()
 
     # Shutdown: release the shared DB pool so connections don't leak on reload.
     await close_pool()
@@ -156,6 +231,7 @@ app.include_router(settings_router, dependencies=_admin)
 # 其余管理端点由 api/tickets.py 内部通过 require_admin 依赖保护。
 app.include_router(tickets_router)
 app.include_router(ticket_links_router, dependencies=_admin)
+app.include_router(jobs_router, dependencies=_admin)
 app.include_router(tools_router, dependencies=_admin)
 
 

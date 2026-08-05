@@ -4,8 +4,8 @@ import remarkGfm from 'remark-gfm'
 import { Badge, Button, Select } from '../components/ui.jsx'
 import Icon from '../components/Icon.jsx'
 import QuestionsPanel from '../components/QuestionsPanel.jsx'
-import { BUSINESS_LINES as BUSINESS_LINE_OPTIONS } from '../config.js'
 import { apiFetch } from '../auth.js'
+import { useBasicConfig, toLabel } from '../config.js'
 
 const ACL_OPTIONS = [
   { value: 'role:public',   label: '公开',   desc: '所有用户（含游客）' },
@@ -64,27 +64,8 @@ function PillSelect({ options, selected, catchAll, onToggle, disabled = false, s
   )
 }
 
-const DOC_TYPE_OPTIONS = [
-  { value: '', label: '—— 不限 ——' },
-  { value: 'faq', label: 'FAQ' },
-  { value: 'manual', label: '操作手册' },
-  { value: 'policy', label: '政策说明' },
-  { value: 'announcement', label: '公告' },
-  { value: 'other', label: '其他' },
-]
-const CATEGORY_OPTIONS = [
-  { value: '', label: '—— 不限 ——' },
-  { value: 'product', label: '产品' },
-  { value: 'after_sales', label: '售后' },
-  { value: 'complaint', label: '投诉' },
-  { value: 'inquiry', label: '咨询' },
-  { value: 'general', label: '通用' },
-]
-const TAG_PRESETS = ['高优', '紧急', '外部', '常见问题', 'VIP', '退款', '发货', '会员']
-const tagPillOptions = TAG_PRESETS.map(t => ({ key: t, label: t }))
 
 const aclPillOptions = ACL_OPTIONS.map((o) => ({ key: o.value, label: o.label, title: o.desc }))
-const groupPillOptions = (groups) => groups.map((g) => ({ key: g.group_id, label: g.name }))
 
 const STATUS_LABEL = {
   active: '已生效',
@@ -93,7 +74,6 @@ const STATUS_LABEL = {
   expired: '已过期'
 }
 
-const BUSINESS_LINES = ['全部业务线', ...BUSINESS_LINE_OPTIONS]
 const PIPELINE_STEPS = ['文档解析', '数据清洗', 'PII 识别与脱敏', '层级化切分', '向量化', '写入索引']
 
 const FILTERS = [
@@ -129,40 +109,36 @@ function ScoreRing({ score }) {
   )
 }
 
-function StatCard({ label, value, tone = 'slate', highlight = false }) {
-  const toneText = { slate: 'text-slate-900', amber: 'text-amber-600', red: 'text-red-600', green: 'text-emerald-600' }
-  return (
-    <div className={`rounded-xl p-4 ${highlight ? 'bg-red-50' : 'bg-white border border-slate-200'}`}>
-      <p className={`text-xs mb-1 ${highlight ? 'text-red-600' : 'text-slate-500'}`}>{label}</p>
-      <p className={`text-2xl font-semibold ${toneText[tone]}`}>{value}</p>
-    </div>
-  )
-}
 
 export default function KnowledgeBase() {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_OPTIONS = useMemo(() => [{ value: '', label: '全部类型' }, ...basicConfig.doc_types], [basicConfig.doc_types])
+  const DOC_TYPE_LABEL   = useMemo(() => toLabel(basicConfig.doc_types), [basicConfig.doc_types])
+  const CATEGORY_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.categories], [basicConfig.categories])
+  const tagPillOptions   = useMemo(() => basicConfig.tag_presets.map(t => ({ key: t, label: t })), [basicConfig.tag_presets])
+
   const [documents, setDocuments] = useState([])
-  const [groups, setGroups] = useState([])
   const [metrics, setMetrics] = useState({ chunk_count: 0, doc_count: 0 })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('all')
-  const [businessLine, setBusinessLine] = useState('全部业务线')
+  const [docTypeFilter, setDocTypeFilter] = useState('')
   const [groupFilter, setGroupFilter] = useState('')
   const [keyword, setKeyword] = useState('')
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [detailId, setDetailId] = useState(null)
   const [showUpload, setShowUpload] = useState(false)
+  const [ingestToast, setIngestToast] = useState(null)  // { jobId, filename }
 
   const loadDocs = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const [active, pending, rejected, metricsRes, groupsRes] = await Promise.all([
+      const [active, pending, rejected, metricsRes] = await Promise.all([
         apiFetch('/api/ops/documents?status=active&limit=200').then((r) => r.json()),
         apiFetch('/api/ops/documents?status=pending&limit=200').then((r) => r.json()),
         apiFetch('/api/ops/documents?status=rejected&limit=200').then((r) => r.json()),
         apiFetch('/api/ops/metrics').then((r) => r.json()),
-        apiFetch('/api/ops/groups').then((r) => r.json()),
       ])
       const all = [
         ...(active.documents ?? []),
@@ -171,7 +147,6 @@ export default function KnowledgeBase() {
       ]
       setDocuments(all)
       setMetrics(metricsRes)
-      setGroups(groupsRes.groups ?? [])
       setDetailId((prev) => prev ?? all[0]?.doc_id ?? null)
     } catch (e) {
       setError(e.message)
@@ -193,12 +168,12 @@ export default function KnowledgeBase() {
         (filter === 'pending' && d.status === 'pending') ||
         (filter === 'rejected' && d.status === 'rejected') ||
         (filter === 'expired' && d.status === 'expired')
-      const matchLine = businessLine === '全部业务线' || d.business_line === businessLine
+      const matchDocType = !docTypeFilter || d.doc_type === docTypeFilter
       const matchGroup = !groupFilter || (d.group_ids ?? []).includes(groupFilter)
       const matchKw = !keyword || d.title.includes(keyword) || d.doc_id.includes(keyword)
-      return matchFilter && matchLine && matchGroup && matchKw
+      return matchFilter && matchDocType && matchGroup && matchKw
     })
-  }, [documents, filter, businessLine, groupFilter, keyword])
+  }, [documents, filter, docTypeFilter, groupFilter, keyword])
 
   const detailDoc = documents.find((d) => d.doc_id === detailId) ?? documents[0] ?? null
   const allChecked = filtered.length > 0 && filtered.every((d) => selectedIds.has(d.doc_id))
@@ -281,11 +256,11 @@ export default function KnowledgeBase() {
     }
   }
 
-  const groupLabels = Object.fromEntries(groups.map((g) => [g.group_id, g.name]))
-  const groupSelectOptions = [
+  const groupLabels = useMemo(() => toLabel(basicConfig.groups), [basicConfig.groups])
+  const groupSelectOptions = useMemo(() => [
     { value: '', label: '全部项目组' },
-    ...groups.map((g) => ({ value: g.group_id, label: g.name })),
-  ]
+    ...basicConfig.groups,
+  ], [basicConfig.groups])
 
   if (error) {
     return (
@@ -298,11 +273,19 @@ export default function KnowledgeBase() {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-        <StatCard label="生效文档" value={loading ? '…' : metrics.doc_count} />
-        <StatCard label="待审核" value={loading ? '…' : pendingCount} tone="amber" />
-        <StatCard label="知识块总数" value={loading ? '…' : metrics.chunk_count} tone="green" />
-        <StatCard label="知识更新时效" value="≤ 15min" tone="green" />
+      <div className="grid grid-cols-5 gap-3">
+        {[
+          { label: '生效文档', value: metrics.doc_count,  bg: 'bg-white',        num: 'text-slate-800' },
+          { label: '待审核',   value: pendingCount,        bg: pendingCount  > 0 ? 'bg-amber-50'  : 'bg-white', num: pendingCount  > 0 ? 'text-amber-600'  : 'text-slate-800' },
+          { label: '已驳回',   value: rejectedCount,       bg: rejectedCount > 0 ? 'bg-red-50'    : 'bg-white', num: rejectedCount > 0 ? 'text-red-600'    : 'text-slate-800' },
+          { label: '已过期',   value: expiredCount,        bg: expiredCount  > 0 ? 'bg-orange-50' : 'bg-white', num: expiredCount  > 0 ? 'text-orange-600' : 'text-slate-800' },
+          { label: '知识块',   value: metrics.chunk_count, bg: 'bg-indigo-50',   num: 'text-indigo-600' },
+        ].map(({ label, value, bg, num }) => (
+          <div key={label} className={`${bg} border border-slate-200 rounded-xl px-4 py-3`}>
+            <p className="text-xs text-slate-400 mb-1">{label}</p>
+            <p className={`text-xl font-semibold ${num}`}>{loading ? '…' : value}</p>
+          </div>
+        ))}
       </div>
 
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -327,7 +310,7 @@ export default function KnowledgeBase() {
           })}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Select value={businessLine} onChange={setBusinessLine} options={BUSINESS_LINES} />
+          <Select value={docTypeFilter} onChange={setDocTypeFilter} options={DOC_TYPE_OPTIONS} />
           <Select
             value={groupFilter}
             onChange={setGroupFilter}
@@ -342,6 +325,14 @@ export default function KnowledgeBase() {
               className="text-xs border border-slate-200 rounded-lg pl-7 pr-2 py-1.5 w-52"
             />
           </div>
+          <button
+            onClick={loadDocs}
+            disabled={loading}
+            title="刷新"
+            className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-600 hover:bg-slate-50 disabled:opacity-40 transition-colors"
+          >
+            <Icon name="refresh-cw" size={14} className={loading ? 'animate-spin' : ''} />
+          </button>
           <Button variant="primary" size="sm" onClick={() => setShowUpload(true)}>
             <Icon name="upload" size={14} />
             上传文档
@@ -361,7 +352,7 @@ export default function KnowledgeBase() {
       )}
 
       <div className="flex bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="flex-1 min-w-0 max-h-[520px] overflow-auto">
+        <div className="flex-1 min-w-0 h-[calc(100vh-280px)] overflow-auto">
           <table className="w-full text-sm table-fixed">
             <thead>
               <tr className="text-left text-xs text-slate-400 border-b border-slate-100 sticky top-0 bg-white">
@@ -369,10 +360,10 @@ export default function KnowledgeBase() {
                   <input type="checkbox" checked={allChecked} onChange={(e) => toggleSelectAll(e.target.checked)} />
                 </th>
                 <th className="w-52 px-2 py-2 font-medium">文档</th>
-                <th className="w-28 px-2 py-2 font-medium">项目组</th>
-                <th className="w-16 px-2 py-2 font-medium">准入分</th>
+                <th className="w-32 px-2 py-2 font-medium">项目组</th>
+                <th className="w-12 px-2 py-2 font-medium">准入分</th>
                 <th className="w-20 px-2 py-2 font-medium">状态</th>
-                <th className="w-36 px-2 py-2 font-medium">更新时间</th>
+                <th className="w-28 px-2 py-2 font-medium">更新时间</th>
               </tr>
             </thead>
             <tbody>
@@ -399,7 +390,7 @@ export default function KnowledgeBase() {
                   </td>
                   <td className="px-2 py-2.5 overflow-hidden">
                     <p className="font-medium text-slate-800 truncate">{d.title}</p>
-                    <p className="text-xs text-slate-400 truncate">{d.doc_id} · {d.business_line}</p>
+                    <p className="text-xs text-slate-400 truncate">{d.doc_id}{d.doc_type ? ` · ${DOC_TYPE_LABEL[d.doc_type] || d.doc_type}` : ''}</p>
                   </td>
                   <td className="px-2 py-2.5">
                     <div className="flex flex-wrap gap-1">
@@ -423,26 +414,55 @@ export default function KnowledgeBase() {
           </table>
         </div>
         <div className="hidden lg:block">
-          <DetailPanel doc={detailDoc} onDisable={disableDoc} onDelete={deleteDoc} onRebuild={rebuildDoc} groups={groups} onGroupsChange={loadDocs} />
+          <DetailPanel doc={detailDoc} onDisable={disableDoc} onDelete={deleteDoc} onRebuild={rebuildDoc} onGroupsChange={loadDocs} />
         </div>
       </div>
 
+      {ingestToast && (
+        <IngestToast
+          filename={ingestToast.filename}
+          onClose={() => setIngestToast(null)}
+        />
+      )}
+
       {showUpload && (
         <UploadModal
-          groups={groups}
           onClose={() => setShowUpload(false)}
-          onSuccess={() => { setShowUpload(false); loadDocs() }}
+          onSuccess={({ filename }) => {
+            setShowUpload(false)
+            setIngestToast({ filename })
+            setTimeout(() => setIngestToast(null), 6000)
+          }}
         />
       )}
     </div>
   )
 }
 
+function IngestToast({ filename, onClose }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex items-start gap-3 bg-slate-800 text-white rounded-xl px-4 py-3 shadow-2xl max-w-sm border border-slate-700">
+      <span className="text-base mt-0.5 shrink-0">📄</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-slate-100">解析任务已创建</p>
+        <p className="text-xs text-slate-400 mt-0.5 truncate" title={filename}>
+          {filename} · 请在侧栏任务中心查看进度
+        </p>
+      </div>
+      <button onClick={onClose} className="text-slate-500 hover:text-slate-300 shrink-0 mt-0.5">
+        <Icon name="x" size={14} />
+      </button>
+    </div>
+  )
+}
+
 function DocEditModal({ doc, onClose, onSaved }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.doc_types], [basicConfig.doc_types])
   const [form, setForm] = useState({
     title: doc.title ?? '',
     owner_email: doc.owner_email ?? '',
-    business_line: doc.business_line ?? '',
+    doc_type: doc.doc_type ?? '',
     version: doc.version ?? '',
     source_url: doc.source_url ?? '',
     effective_from: doc.effective_from ? String(doc.effective_from).slice(0, 16).replace(' ', 'T') : '',
@@ -499,12 +519,12 @@ function DocEditModal({ doc, onClose, onSaved }) {
             />
           </div>
           <div>
-            <label className="text-xs text-slate-500 block mb-1">业务线</label>
+            <label className="text-xs text-slate-500 block mb-1">文档类型</label>
             <Select
               className="w-full"
-              value={form.business_line}
-              onChange={(v) => set('business_line', v)}
-              options={BUSINESS_LINE_OPTIONS}
+              value={form.doc_type}
+              onChange={(v) => set('doc_type', v)}
+              options={DOC_TYPE_OPTIONS}
             />
           </div>
           <div>
@@ -560,7 +580,9 @@ function DocEditModal({ doc, onClose, onSaved }) {
   )
 }
 
-function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChange }) {
+function DetailPanel({ doc, onDisable, onDelete, onRebuild, onGroupsChange }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_LABEL = useMemo(() => toLabel(basicConfig.doc_types), [basicConfig.doc_types])
   const [saving, setSaving] = useState(false)
   const [showEdit, setShowEdit] = useState(false)
   const [showRebuild, setShowRebuild] = useState(false)
@@ -602,25 +624,60 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
     }
   }
 
+  async function saveDocType(value) {
+    setSaving(true)
+    try {
+      await apiFetch(`/api/ops/documents/${doc.doc_id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_type: value || null }),
+      })
+      onGroupsChange()
+    } finally {
+      setSaving(false)
+    }
+  }
+
   if (!doc) {
-    return <div className="w-96 shrink-0 border-l border-slate-100 p-4 text-sm text-slate-400">选择左侧文档查看详情</div>
+    return <div className="w-96 shrink-0 border-l border-slate-100 h-[calc(100vh-280px)] p-4 text-sm text-slate-400">选择左侧文档查看详情</div>
   }
   return (
-    <div className="w-96 shrink-0 border-l border-slate-100 flex flex-col max-h-[520px]">
+    <div className="w-96 shrink-0 border-l border-slate-100 flex flex-col h-[calc(100vh-280px)]">
       <div className="flex-1 overflow-y-auto p-4 text-sm space-y-3">
-      <div>
-        <p className="font-medium text-slate-800">{doc.title}</p>
-        <p className="text-xs text-slate-400 mt-0.5">{doc.doc_id}</p>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-medium text-slate-800 truncate">{doc.title}</p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            {doc.doc_id}{doc.doc_type ? ` · ${DOC_TYPE_LABEL[doc.doc_type] || doc.doc_type}` : ''}
+          </p>
+        </div>
+        <button
+          onClick={() => setShowSource(true)}
+          className="text-xs text-indigo-500 hover:text-indigo-700 underline shrink-0 mt-0.5"
+        >
+          查看文档
+        </button>
       </div>
 
       <DetailRow label="Owner" value={doc.owner_email} />
+      <div className="flex items-center justify-between border-b border-slate-50 pb-1.5 text-xs">
+        <span className="text-slate-400 shrink-0">文档类型</span>
+        <Select
+          value={doc.doc_type ?? ''}
+          onChange={saveDocType}
+          options={[{ value: '', label: '—' }, ...basicConfig.doc_types]}
+          disabled={saving}
+        />
+      </div>
       <DetailRow label="来源类型" value={doc.source_type} />
       <DetailRow label="版本" value={doc.version} />
-      <DetailRow label="生效时间" value={fmtDate(doc.effective_from)} />
-      <DetailRow label="失效时间" value={fmtDate(doc.effective_to)} />
-      {doc.source_url && (
-        <div className="flex items-center justify-between border-b border-slate-50 pb-1.5 text-xs">
-          <span className="text-slate-400 shrink-0">原文链接</span>
+      <DetailRow
+        label="有效期"
+        value={`${fmtDate(doc.effective_from)} ~ ${fmtDate(doc.effective_to)}`}
+      />
+      <div className="flex items-center justify-between border-b border-slate-50 pb-1.5 text-xs">
+        <span className="text-slate-400 shrink-0">原文链接</span>
+        {doc.source_url ? (
           <a
             href={doc.source_url}
             target="_blank"
@@ -630,8 +687,10 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
           >
             {doc.source_url}
           </a>
-        </div>
-      )}
+        ) : (
+          <span className="text-slate-300">—</span>
+        )}
+      </div>
 
       <DetailRow
         label="切分参数"
@@ -653,7 +712,7 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
       <div>
         <p className="text-xs text-slate-400 mb-2">项目组归属 {saving && <span className="text-indigo-400">保存中…</span>}</p>
         <PillSelect
-          options={groupPillOptions(groups)}
+          options={basicConfig.groups.map((g) => ({ key: g.value, label: g.label }))}
           selected={docGroupIds}
           catchAll="global"
           onToggle={toggleGroup}
@@ -690,13 +749,12 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, groups, onGroupsChan
     </div>
 
       <div className="shrink-0 border-t border-slate-100 p-4 pb-6 flex gap-2 flex-wrap bg-white">
-        <Button size="sm" onClick={() => setShowSource(true)}>查看原文</Button>
-        <Button size="sm" onClick={() => setShowEdit(true)}>编辑</Button>
-        <Button size="sm" variant="primary" className="w-20" disabled={saving} onClick={() => setShowRebuild(true)}>重构</Button>
+        <Button size="sm" className="w-16" onClick={() => setShowEdit(true)}>编辑</Button>
+        <Button size="sm" variant="primary" className="w-16" disabled={saving} onClick={() => setShowRebuild(true)}>重构</Button>
         {doc.status !== 'rejected' && (
-          <Button size="sm" variant="warning" className="w-20" disabled={saving} onClick={() => onDisable(doc.doc_id)}>下架</Button>
+          <Button size="sm" variant="warning" className="w-16" disabled={saving} onClick={() => onDisable(doc.doc_id)}>下架</Button>
         )}
-        <Button size="sm" variant="danger-solid" className="w-20" disabled={saving} onClick={() => onDelete(doc.doc_id)}>删除</Button>
+        <Button size="sm" variant="danger-solid" className="w-16" disabled={saving} onClick={() => onDelete(doc.doc_id)}>删除</Button>
       </div>
 
       {showEdit && (
@@ -739,14 +797,16 @@ function DetailRow({ label, value }) {
   )
 }
 
-function UploadModal({ groups, onClose, onSuccess }) {
+function UploadModal({ onClose, onSuccess }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.doc_types], [basicConfig.doc_types])
   const [file, setFile] = useState(null)
   const [owner, setOwner] = useState('')
   const [sourceUrl, setSourceUrl] = useState('')
   const [version, setVersion] = useState('1.0')
   const [effectiveFrom, setEffectiveFrom] = useState('')
   const [effectiveTo, setEffectiveTo] = useState('')
-  const [businessLine, setBusinessLine] = useState(BUSINESS_LINE_OPTIONS[0])
+  const [docType, setDocType] = useState('')
   const [selectedGroups, setSelectedGroups] = useState(['global'])
   const [selectedAcl, setSelectedAcl] = useState(['role:public'])
   const [chunkSize, setChunkSize] = useState('600')
@@ -774,7 +834,7 @@ function UploadModal({ groups, onClose, onSuccess }) {
       fd.append('file', file)
       fd.append('doc_id', docId)
       fd.append('owner', owner)
-      fd.append('business_line', businessLine)
+      if (docType) fd.append('doc_type', docType)
       fd.append('group_ids', selectedGroups.join(','))
       fd.append('acl_roles', selectedAcl.join(','))
       if (sourceUrl.trim()) fd.append('source_url', sourceUrl.trim())
@@ -785,10 +845,11 @@ function UploadModal({ groups, onClose, onSuccess }) {
       if (chunkOverlap) fd.append('chunk_overlap', chunkOverlap)
 
       const res = await apiFetch('/api/pipeline/ingest', { method: 'POST', body: fd })
-      if (!res.ok) throw new Error(await res.text())
-      onSuccess()
+      if (!res.status || res.status >= 400) throw new Error(await res.text())
+      onSuccess({ filename: file.name })
     } catch (e) {
       setUploadError(e.message)
+    } finally {
       setUploading(false)
     }
   }
@@ -821,11 +882,11 @@ function UploadModal({ groups, onClose, onSuccess }) {
 
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="text-xs text-slate-500">业务线</label>
+            <label className="text-xs text-slate-500">文档类型</label>
             <Select
-              value={businessLine}
-              onChange={setBusinessLine}
-              options={BUSINESS_LINE_OPTIONS}
+              value={docType}
+              onChange={setDocType}
+              options={DOC_TYPE_OPTIONS}
               className="w-full mt-1"
               size="md"
             />
@@ -912,7 +973,7 @@ function UploadModal({ groups, onClose, onSuccess }) {
         <div>
           <label className="text-xs text-slate-500 block mb-2">项目组归属</label>
           <PillSelect
-            options={groupPillOptions(groups)}
+            options={basicConfig.groups.map((g) => ({ key: g.value, label: g.label }))}
             selected={selectedGroups}
             catchAll="global"
             onToggle={toggleGroup}
@@ -935,12 +996,12 @@ function UploadModal({ groups, onClose, onSuccess }) {
         {uploadError && <p className="text-xs text-red-500">{uploadError}</p>}
 
         <p className="text-xs text-slate-400">
-          上传后将自动执行：解析 → PII 脱敏 → 层级化切分（{chunkSize}/{chunkOverlap} tokens）→ 向量化入库，预计 15 分钟内生效。
+          提交后将在后台执行：解析 → 层级化切分（{chunkSize}/{chunkOverlap} tokens）→ 向量化入库。可在侧栏「任务中心」实时查看进度。
         </p>
         <div className="flex justify-end gap-2 pt-2">
           <Button size="sm" onClick={onClose} disabled={uploading}>取消</Button>
           <Button size="sm" variant="primary" onClick={handleSubmit} disabled={uploading}>
-            {uploading ? '上传中…' : '开始上传'}
+            {uploading ? '提交中…' : '开始上传'}
           </Button>
         </div>
       </div>
@@ -1341,6 +1402,10 @@ function AdmissionModal({ doc, onClose }) {
 }
 
 function ChunkEditModal({ chunk, onClose, onSave }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.doc_types], [basicConfig.doc_types])
+  const CATEGORY_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.categories], [basicConfig.categories])
+  const tagPillOptions   = useMemo(() => basicConfig.tag_presets.map(t => ({ key: t, label: t })), [basicConfig.tag_presets])
   const isNew = !chunk?.chunk_id
   const [title, setTitle] = useState(chunk?.title ?? '')
   const [breadcrumb, setBreadcrumb] = useState(chunk?.breadcrumb ?? '')

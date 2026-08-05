@@ -9,6 +9,7 @@ At eval time the pipeline produces:
   answer       — LLM-generated response
   ragas_metrics — full Ragas metric set
 """
+import asyncio
 import csv
 import io
 import json
@@ -19,10 +20,11 @@ import time
 from typing import List
 
 import asyncpg
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from db import get_pool
+from job_registry import create_job, is_cancel_requested, mark_running, publish_progress
 
 logger = logging.getLogger(__name__)
 
@@ -528,14 +530,13 @@ async def run_single_eval(
 @router.post("/datasets/{dataset_id}/eval", status_code=202)
 async def run_batch_eval(
     dataset_id: str,
-    background_tasks: BackgroundTasks,
     options: EvalOptions = EvalOptions(),
 ):
-    """Start async batch evaluation. Returns immediately with batch_record_id."""
+    """Start async batch evaluation. Returns immediately with job_id + batch_record_id."""
     conn = await _get_conn()
     try:
         ds = await conn.fetchrow(
-            "SELECT dataset_id FROM eval_datasets WHERE dataset_id=$1", dataset_id
+            "SELECT dataset_id, name FROM eval_datasets WHERE dataset_id=$1", dataset_id
         )
         if not ds:
             raise HTTPException(status_code=404, detail="Dataset not found")
@@ -570,6 +571,7 @@ async def run_batch_eval(
         batch_record_id = f"batch_{int(time.time() * 1000)}"
         item_list = [dict(r) for r in items]
         enabled_metrics = set(options.metrics) if options.metrics else None
+        ds_name = ds["name"] or dataset_id
 
         await conn.execute(
             "INSERT INTO eval_batch_runs(batch_record_id, dataset_id, status, total_items)"
@@ -577,13 +579,23 @@ async def run_batch_eval(
             batch_record_id, dataset_id, len(item_list),
         )
 
-        background_tasks.add_task(
-            _run_batch_background, dataset_id, batch_record_id, item_list,
-            options.top_k, options.temperature, enabled_metrics,
+        job_id = await create_job(
+            job_type="eval_batch",
+            display_name=f"评估「{ds_name}」({len(item_list)} 条)",
+            ref_id=batch_record_id,
+            created_by="admin",
+            total=len(item_list),
         )
+
+        asyncio.create_task(_run_batch_background(
+            dataset_id, batch_record_id, item_list,
+            options.top_k, options.temperature, enabled_metrics, job_id,
+        ))
+
         return {
+            "job_id": job_id,
             "batch_record_id": batch_record_id,
-            "status": "running",
+            "status": "pending",
             "total_items": len(item_list),
         }
     finally:
@@ -597,17 +609,43 @@ async def _run_batch_background(
     top_k: int,
     temperature: float = 0.0,
     enabled_metrics: set | None = None,
+    job_id: str | None = None,
 ) -> None:
     """Background worker: evaluate each item, update progress, store aggregate."""
     metric_keys = [
         "context_relevancy", "faithfulness", "answer_relevancy",
         "context_recall", "answer_correctness", "context_precision",
     ]
+    total = len(items)
     results = []
     completed = 0
     conn = await _get_conn()
+
+    async def _pub(status: str, phase: str | None = None, **kw):
+        if job_id:
+            await publish_progress(job_id, status, current=completed, total=total, phase=phase, **kw)
+
     try:
+        if job_id:
+            await mark_running(job_id)
+        await _pub("running", f"已评估 {completed}/{total} 条")
+
         for item in items:
+            # Cooperative cancellation: check before each item
+            if job_id and await is_cancel_requested(job_id):
+                await conn.execute(
+                    "UPDATE eval_batch_runs SET status='cancelled', completed_items=$2"
+                    " WHERE batch_record_id=$1",
+                    batch_record_id, completed,
+                )
+                await _pub("cancelled", result_data={
+                    "batch_record_id": batch_record_id,
+                    "completed_items": completed,
+                    "total_items": total,
+                })
+                logger.info("Batch run %s cancelled after %d/%d items", batch_record_id, completed, total)
+                return
+
             try:
                 result = await _do_eval(
                     conn, dataset_id, item["item_id"],
@@ -624,6 +662,7 @@ async def _run_batch_background(
                 "UPDATE eval_batch_runs SET completed_items=$2 WHERE batch_record_id=$1",
                 batch_record_id, completed,
             )
+            await _pub("running", f"已评估 {completed}/{total} 条")
 
         # Aggregate
         aggregate: dict[str, float] = {}
@@ -640,25 +679,33 @@ async def _run_batch_background(
 
         total_latency = sum(r.get("latency_ms", 0) for r in results)
         avg_latency = round(total_latency / len(results), 1) if results else 0.0
+        agg_payload = _json_safe({
+            "aggregate_ragas_metrics": aggregate,
+            "avg_latency_ms": avg_latency,
+            "total_items": total,
+            "success_items": len(results),
+        })
 
         await conn.execute(
             "UPDATE eval_batch_runs"
             " SET status='completed', completed_items=$2,"
             "     aggregate_metrics=$3, completed_at=now()"
             " WHERE batch_record_id=$1",
-            batch_record_id, completed, json.dumps(_json_safe({
-                "aggregate_ragas_metrics": aggregate,
-                "avg_latency_ms": avg_latency,
-                "total_items": len(items),
-                "success_items": len(results),
-            })),
+            batch_record_id, completed, json.dumps(agg_payload),
         )
+        await _pub("completed", result_data={
+            "batch_record_id": batch_record_id,
+            "completed_items": completed,
+            "total_items": total,
+        })
+
     except Exception:
         logger.exception("Batch run %s failed", batch_record_id)
         await conn.execute(
             "UPDATE eval_batch_runs SET status='failed', error_msg=$2 WHERE batch_record_id=$1",
             batch_record_id, "内部错误，请查看日志",
         )
+        await _pub("failed", error_message="内部错误，请查看日志")
     finally:
         await _release_conn(conn)
 

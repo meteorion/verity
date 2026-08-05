@@ -6,27 +6,7 @@ import Icon from '../components/Icon.jsx'
 import QuestionsPanel from '../components/QuestionsPanel.jsx'
 import { MD_COMPONENTS } from '../components/mdComponents.jsx'
 import { apiFetch } from '../auth.js'
-
-const DOC_TYPE_OPTIONS = [
-  { value: '', label: '—— 不限 ——' },
-  { value: 'faq', label: 'FAQ' },
-  { value: 'manual', label: '操作手册' },
-  { value: 'policy', label: '政策说明' },
-  { value: 'announcement', label: '公告' },
-  { value: 'other', label: '其他' },
-]
-const CATEGORY_OPTIONS = [
-  { value: '', label: '—— 不限 ——' },
-  { value: 'product', label: '产品' },
-  { value: 'after_sales', label: '售后' },
-  { value: 'complaint', label: '投诉' },
-  { value: 'inquiry', label: '咨询' },
-  { value: 'general', label: '通用' },
-]
-const TAG_PRESETS = ['高优', '紧急', '外部', '常见问题', 'VIP', '退款', '发货', '会员']
-
-const DOC_TYPE_LABEL = { faq: 'FAQ', manual: '操作手册', policy: '政策说明', announcement: '公告', other: '其他' }
-const CATEGORY_LABEL = { product: '产品', after_sales: '售后', complaint: '投诉', inquiry: '咨询', general: '通用' }
+import { useBasicConfig, toLabel } from '../config.js'
 
 function fmtDate(iso) {
   if (!iso) return '-'
@@ -44,6 +24,13 @@ function arrStr(arr) {
 }
 
 export default function Chunks() {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.doc_types], [basicConfig.doc_types])
+  const CATEGORY_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.categories], [basicConfig.categories])
+  const DOC_TYPE_LABEL   = useMemo(() => toLabel(basicConfig.doc_types), [basicConfig.doc_types])
+  const CATEGORY_LABEL   = useMemo(() => toLabel(basicConfig.categories), [basicConfig.categories])
+  const TAG_PRESETS      = basicConfig.tag_presets
+
   const [chunks, setChunks] = useState([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -60,7 +47,7 @@ export default function Chunks() {
   const [editingChunk, setEditingChunk] = useState(null)   // null | chunk object | 'new'
   const [showImport, setShowImport] = useState(false)
   const [showGenerate, setShowGenerate] = useState(false)
-  const [generated, setGenerated] = useState(null)         // null | { chunks, download }
+  const [generateToast, setGenerateToast] = useState(null) // null | { filename }
   const [groups, setGroups] = useState([])
 
   const loadDocuments = useCallback(async () => {
@@ -249,7 +236,7 @@ export default function Chunks() {
           </div>
           <Button size="sm" onClick={() => setShowGenerate(true)}>
             <Icon name="layers" size={14} />
-            生成预览
+            生成导出
           </Button>
           <Button size="sm" onClick={() => setShowImport(true)}>
             <Icon name="upload" size={14} />
@@ -272,7 +259,7 @@ export default function Chunks() {
 
       {/* Table */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="max-h-[600px] overflow-auto">
+        <div className="h-[calc(100vh-280px)] overflow-auto">
           <table className="w-full text-sm table-fixed">
             <thead>
               <tr className="text-left text-xs text-slate-400 border-b border-slate-100 sticky top-0 bg-white z-10">
@@ -394,15 +381,16 @@ export default function Chunks() {
       {showGenerate && (
         <GenerateModal
           onClose={() => setShowGenerate(false)}
-          onGenerated={(result) => { setShowGenerate(false); setGenerated(result) }}
+          onSuccess={({ filename }) => {
+            setShowGenerate(false)
+            setGenerateToast({ filename })
+            setTimeout(() => setGenerateToast(null), 6000)
+          }}
         />
       )}
 
-      {generated && (
-        <GeneratePreviewModal
-          result={generated}
-          onClose={() => setGenerated(null)}
-        />
+      {generateToast && (
+        <GenerateToast filename={generateToast.filename} onClose={() => setGenerateToast(null)} />
       )}
     </div>
   )
@@ -437,6 +425,9 @@ function TagList({ label, items }) {
 
 
 function ChunkDetailDrawer({ chunk, groupLabels, onClose, onEdit, onDelete }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_LABEL = useMemo(() => toLabel(basicConfig.doc_types), [basicConfig.doc_types])
+  const CATEGORY_LABEL = useMemo(() => toLabel(basicConfig.categories), [basicConfig.categories])
   return (
     <>
       {/* Backdrop */}
@@ -480,11 +471,12 @@ function ChunkDetailDrawer({ chunk, groupLabels, onClose, onEdit, onDelete }) {
               {(chunk.chunk_size != null || chunk.chunk_overlap != null) && (
                 <MetaRow label="切分参数" value={`${chunk.chunk_size ?? 600} / ${chunk.chunk_overlap ?? 80} tokens`} />
               )}
-              {chunk.doc_type && <MetaRow label="文档类型" value={DOC_TYPE_LABEL[chunk.doc_type] || chunk.doc_type} />}
-              {chunk.category && <MetaRow label="分类" value={CATEGORY_LABEL[chunk.category] || chunk.category} />}
-              {chunk.tags?.length > 0 && (
-                <TagList label="标签" items={chunk.tags} />
-              )}
+              <MetaRow label="文档类型" value={DOC_TYPE_LABEL[chunk.doc_type] || chunk.doc_type || '—'} />
+              <MetaRow label="分类" value={CATEGORY_LABEL[chunk.category] || chunk.category || '—'} />
+              {chunk.tags?.length > 0
+                ? <TagList label="标签" items={chunk.tags} />
+                : <MetaRow label="标签" value="—" />
+              }
             </div>
           </section>
 
@@ -611,6 +603,10 @@ function TagPills({ selected, options, onChange }) {
 }
 
 function ChunkEditModal({ chunk, documents, defaultDocId, onClose, onSave }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.doc_types], [basicConfig.doc_types])
+  const CATEGORY_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.categories], [basicConfig.categories])
+  const TAG_PRESETS      = basicConfig.tag_presets
   const isNew = !chunk?.chunk_id
   const [docId, setDocId] = useState(chunk?.doc_id ?? defaultDocId ?? documents[0]?.doc_id ?? '')
   const [title, setTitle] = useState(chunk?.title ?? '')
@@ -943,10 +939,31 @@ function ImportModal({ documents, onClose, onSuccess }) {
   )
 }
 
-// ── Generate Preview (chunk-export 工具：解析+分块，不入库) ──────────────────
+// ── Generate (chunk-export 工具：解析+分块，不入库，后台任务) ─────────────────
 
-function GenerateModal({ onClose, onGenerated }) {
+function GenerateToast({ filename, onClose }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex items-start gap-3 bg-white border border-slate-200 rounded-xl shadow-lg px-4 py-3 max-w-xs">
+      <span className="text-lg shrink-0">🧩</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-semibold text-slate-800">导出任务已提交</p>
+        <p className="text-xs text-slate-500 mt-0.5 truncate" title={filename}>{filename}</p>
+        <p className="text-xs text-slate-400 mt-1">请在<span className="text-indigo-500 font-medium">任务中心</span>查看进度并下载结果</p>
+      </div>
+      <button onClick={onClose} className="text-slate-300 hover:text-slate-500 shrink-0 mt-0.5">
+        <Icon name="x" size={13} />
+      </button>
+    </div>
+  )
+}
+
+function GenerateModal({ onClose, onSuccess }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.doc_types], [basicConfig.doc_types])
+  const CATEGORY_OPTIONS = useMemo(() => [{ value: '', label: '—— 不限 ——' }, ...basicConfig.categories], [basicConfig.categories])
+  const TAG_PRESETS      = basicConfig.tag_presets
   const [file, setFile] = useState(null)
+  const [exportFormat, setExportFormat] = useState('jsonl')
   const [docId, setDocId] = useState('')
   const [docType, setDocType] = useState('')
   const [category, setCategory] = useState('')
@@ -963,10 +980,10 @@ function GenerateModal({ onClose, onGenerated }) {
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState(null)
 
-  function buildFormData(fmt) {
+  function buildFormData() {
     const fd = new FormData()
     fd.append('file', file)
-    fd.append('format', fmt)
+    fd.append('format', exportFormat)
     if (docId.trim()) fd.append('doc_id', docId.trim())
     if (docType) fd.append('doc_type', docType)
     if (category) fd.append('category', category)
@@ -983,30 +1000,18 @@ function GenerateModal({ onClose, onGenerated }) {
     return fd
   }
 
-  async function download(fmt) {
-    const res = await apiFetch('/api/tools/chunk-export', { method: 'POST', body: buildFormData(fmt) })
-    if (!res.ok) throw new Error(await res.text())
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `chunks_preview.${fmt}`
-    a.click()
-    URL.revokeObjectURL(url)
-  }
-
   async function handleSubmit() {
     if (!file) { setError('请选择文件'); return }
     setGenerating(true)
     setError(null)
     try {
-      const res = await apiFetch('/api/tools/chunk-export', { method: 'POST', body: buildFormData('json') })
+      const res = await apiFetch('/api/tools/chunk-export', { method: 'POST', body: buildFormData() })
       if (!res.ok) {
         const d = await res.json().catch(() => null)
         throw new Error(d?.detail || await res.text())
       }
-      const chunks = await res.json()
-      onGenerated({ chunks, download })
+      // 202: job created
+      onSuccess({ filename: file.name })
     } catch (e) {
       setError(e.message)
       setGenerating(false)
@@ -1018,8 +1023,8 @@ function GenerateModal({ onClose, onGenerated }) {
       <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 shrink-0">
           <div>
-            <h3 className="text-sm font-semibold text-slate-800">生成 Chunks 预览</h3>
-            <p className="text-xs text-slate-400 mt-0.5">解析 + 切分，不写入数据库，供入库前校对质量</p>
+            <h3 className="text-sm font-semibold text-slate-800">生成 Chunks 导出</h3>
+            <p className="text-xs text-slate-400 mt-0.5">解析 + 切分，不写入数据库，后台运行，完成后可在任务中心下载</p>
           </div>
           <button onClick={onClose} disabled={generating} className="text-slate-400 hover:text-slate-600">
             <Icon name="x" size={18} />
@@ -1042,6 +1047,25 @@ function GenerateModal({ onClose, onGenerated }) {
               onChange={(e) => setFile(e.target.files[0] ?? null)}
             />
           </label>
+
+          <div>
+            <FieldLabel>导出格式</FieldLabel>
+            <div className="flex gap-3 mt-1">
+              {['jsonl', 'json'].map(fmt => (
+                <label key={fmt} className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="exportFormat"
+                    value={fmt}
+                    checked={exportFormat === fmt}
+                    onChange={() => setExportFormat(fmt)}
+                    className="accent-indigo-500"
+                  />
+                  {fmt.toUpperCase()}
+                </label>
+              ))}
+            </div>
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -1132,7 +1156,7 @@ function GenerateModal({ onClose, onGenerated }) {
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100 shrink-0">
           <Button size="sm" onClick={onClose} disabled={generating}>取消</Button>
           <Button size="sm" variant="primary" onClick={handleSubmit} disabled={generating}>
-            {generating ? '生成中…' : '开始生成'}
+            {generating ? '提交中…' : '开始生成'}
           </Button>
         </div>
       </div>
@@ -1141,6 +1165,9 @@ function GenerateModal({ onClose, onGenerated }) {
 }
 
 function GeneratePreviewModal({ result, onClose }) {
+  const basicConfig = useBasicConfig()
+  const DOC_TYPE_LABEL = useMemo(() => toLabel(basicConfig.doc_types), [basicConfig.doc_types])
+  const CATEGORY_LABEL = useMemo(() => toLabel(basicConfig.categories), [basicConfig.categories])
   const { chunks, download } = result
   const [downloading, setDownloading] = useState(null) // null | 'json' | 'csv'
   const parentCount = chunks.filter((c) => c.is_parent).length
