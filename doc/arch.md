@@ -205,19 +205,22 @@ sequenceDiagram
         A  ->> 业务系统 : Function Calling（query_order 等）
     end
 
-    A  ->> RC : [retrieval] 语义缓存查询（BGE-M3 向量，阈值 0.93）
+    A  ->> A  : [inference] BGE-M3 向量化（dense + sparse）
+    A  ->> RC : [retrieval] 语义缓存查询（P1: hash 精确匹配；P2: 向量相似度 ≥ 0.93）
     alt 缓存命中
-        RC -->> A : 缓存答案
-        A  -->> U : 流式输出（SSE）
+        RC -->> A : 缓存 chunks
+        note over A : 跳过检索，直接进入生成节点
     end
 
-    A  ->> A  : [inference] BGE-M3 向量化（dense + sparse）
-    par 并发双路检索
-        A  ->> PG : 向量检索 Top-50（含 ACL/region/effective_to 过滤）
+    par 并发三路检索（每路 Top-50，含 ACL/region/effective_to 过滤）
+        A  ->> PG : dense 向量检索（HNSW，ef_search 可配）
     and
-        A  ->> PG : 稀疏向量检索 Top-50
+        A  ->> PG : sparse 向量检索（local 模式）
+    and
+        A  ->> PG : question_embeddings 检索（多问法扩充索引）
     end
-    A  ->> A  : [retrieval] RRF 融合（k=60）→ 候选 ~80 条
+    A  ->> A  : [retrieval] 加权 RRF 融合（alpha 可配）→ 候选 ~80 条
+    A  ->> RC : [retrieval] 写语义缓存（TTL 3600s）
     A  ->> A  : [inference] Rerank 精排 → Top-6（分数 ≥ 阈值）
     A  ->> A  : [retrieval] Small-to-Big：按 parent_chunk_id 回查 chunks 表父 chunk
 
@@ -342,33 +345,42 @@ stateDiagram-v2
 ```
 输入：query, uid, roles, region, history_summary
 
-1. 语义缓存查询
-   query_vec = inference.embed(query, mode="dense")
-   cache_hit = redis.vector_search(query_vec, threshold=0.93)
-   if cache_hit: return cache_hit
-
-2. Query 改写（规则模板，≤200ms）
+1. Query 改写（规则模板，≤200ms）
    queries = [original] + rewrite(query, history_summary)  # 最多 3 路
 
-3. BGE-M3 批量向量化（dense + sparse）
+2. BGE-M3 向量化（dense；local 模式同时输出 sparse）
+   dense_vec = inference.embed(query, mode="dense"|"both")
 
-4. 并发双路检索（每路 Top-50，含 where 条件）
+3. 语义缓存查询（P1: hash 精确匹配；P2: 向量相似度 ≥ 0.93）
+   cache_hit = cache.get(hash(dense_vec))
+   if cache_hit: return cache_hit  # 跳过后续检索
+
+4. 并发三路检索（每路 Top-50，含 where 条件）
    where = {
      acl:          {$in: roles},
      region:       {$in: [region, "global"]},
      effective_to: {$or: [null, {$gt: now}]},
+     is_parent:    false,
    }
+   dense_rows    = pg.hnsw_search(dense_vec, ef_search=hnsw_ef_search)
+   sparse_rows   = pg.sparse_search(sparse_vec)          # local 模式
+   question_rows = pg.hnsw_search(dense_vec, table=question_embeddings)
 
-5. RRF 融合：score(d) = Σ 1 / (60 + rank_i(d))
+5. 加权 RRF 融合
+   score(d) = α/(60+dense_rank) + (1-α)/(60+sparse_rank) + 0.3/(60+question_rank)
+   α 由 settings.rrf_alpha 控制（默认 0.6）
 
-6. Rerank（Cross-Encoder，阈值过滤）→ Top-6
+6. dense_score_threshold 过滤（cosine 来源，默认关闭）
 
-7. Small-to-Big 扩展（见 retrieval/small_to_big.py）
+7. Rerank（Cross-Encoder，阈值过滤）→ Top-6
+
+8. Small-to-Big 扩展（见 retrieval/small_to_big.py）
    for chunk in top_k:
      if chunk.parent_chunk_id:
-       chunk.context = pg.query("SELECT content FROM chunks WHERE chunk_id=$1", chunk.parent_chunk_id)
+       chunk.content = pg.query("SELECT content FROM chunks WHERE chunk_id=$1 AND is_parent=TRUE",
+                                chunk.parent_chunk_id)
 
-8. 写语义缓存（TTL 3600s）
+9. 写语义缓存（TTL=SEMANTIC_CACHE_TTL，默认 3600s）
 ```
 
 ### 5.3 pipeline/（知识管道）
