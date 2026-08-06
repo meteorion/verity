@@ -35,8 +35,13 @@ def assign_source_indices(chunks: list[dict]) -> list[dict]:
     return result
 
 
-def build_refs(chunks: list[dict]) -> list[dict]:
-    """Return a deduped, idx-sorted refs array for the UI — one entry per source."""
+def build_refs(chunks: list[dict], cited: set[int] | None = None) -> list[dict]:
+    """Return a deduped, idx-sorted refs array for the UI — one entry per source.
+
+    When *cited* is given, only sources whose idx the model actually referenced
+    in its answer (a `[n]` marker) are included — otherwise every retrieved
+    source would show up regardless of whether the answer ever mentioned it.
+    """
     key_to_idx: dict[str, int] = {}
     seen: set[int] = set()
     refs = []
@@ -46,6 +51,8 @@ def build_refs(chunks: list[dict]) -> list[dict]:
             key_to_idx[key] = len(key_to_idx) + 1
         idx = key_to_idx[key]
         if idx in seen:
+            continue
+        if cited is not None and idx not in cited:
             continue
         seen.add(idx)
         refs.append({"idx": idx, **{k: c.get(k, "") for k in REF_KEYS}})

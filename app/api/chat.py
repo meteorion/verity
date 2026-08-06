@@ -153,9 +153,11 @@ async def chat(req: ChatRequest, request: Request):
         total_ms = round((time.perf_counter() - t0) * 1000)
         yield "data: [DONE]\n\n"
         answer_text = "".join(answer_tokens)
-        if last_chunks and re.search(r'\[\d+\]', answer_text):
-            refs = build_refs(last_chunks)
-            yield f"data: [REFS]{json.dumps(refs, ensure_ascii=False)}\n\n"
+        cited = {int(n) for n in re.findall(r'\[(\d+)\]', answer_text)}
+        if last_chunks and cited:
+            refs = build_refs(last_chunks, cited=cited)
+            if refs:
+                yield f"data: [REFS]{json.dumps(refs, ensure_ascii=False)}\n\n"
 
         meta = {
             "cache_hit": bool(last_state.get("cache_hit")),
