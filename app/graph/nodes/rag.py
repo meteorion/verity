@@ -8,6 +8,17 @@ from retrieval.small_to_big import expand_to_parent
 logger = logging.getLogger(__name__)
 
 
+def _use_small_to_big() -> bool:
+    try:
+        from api.settings import load_settings
+        v = load_settings().get("use_small_to_big")
+        if v is None:
+            return True
+        return str(v).lower() not in ("false", "0", "no")
+    except Exception:
+        return True
+
+
 async def _multi_retrieve(
     primary_query: str,
     sub_queries: list[str],
@@ -60,5 +71,6 @@ async def rag_node(state: OrchestratorState) -> dict:
             dense_vec=state.get("query_embedding"),
         )
 
-    chunks = await expand_to_parent(chunks)
+    if _use_small_to_big():
+        chunks = await expand_to_parent(chunks)
     return {"retrieved_chunks": chunks}

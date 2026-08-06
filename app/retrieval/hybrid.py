@@ -28,22 +28,36 @@ def _retrieval_cfg() -> dict[str, Any]:
     try:
         from api.settings import load_settings
         s = load_settings()
+
+        def _bool(key: str, default: bool = True) -> bool:
+            v = s.get(key)
+            if v is None:
+                return default
+            return str(v).lower() not in ("false", "0", "no")
+
         return {
-            "top_k":                int(s.get("retrieval_top_k") or _TOP_K),
-            "top_vector":           int(s.get("retrieval_top_vector") or _TOP_VECTOR),
-            "dense_score_threshold": float(s.get("dense_score_threshold") or 0.0),
-            "rrf_alpha":            float(s.get("rrf_alpha") or 0.6),
-            "ef_search":            int(s.get("hnsw_ef_search") or 100),
-            "rerank_threshold":     float(s.get("rerank_threshold") or 0.0),
+            "top_k":                    int(s.get("retrieval_top_k") or _TOP_K),
+            "top_vector":               int(s.get("retrieval_top_vector") or _TOP_VECTOR),
+            "dense_score_threshold":    float(s.get("dense_score_threshold") or 0.0),
+            "rrf_alpha":                float(s.get("rrf_alpha") or 0.6),
+            "ef_search":                int(s.get("hnsw_ef_search") or 100),
+            "rerank_threshold":         float(s.get("rerank_threshold") or 0.0),
+            # Feature flags — set to false in settings.json to disable for A/B observation
+            "use_cache":                _bool("use_cache"),
+            "use_sparse":               _bool("use_sparse"),
+            "use_question_augmentation": _bool("use_question_augmentation"),
         }
     except Exception:
         return {
-            "top_k":                _TOP_K,
-            "top_vector":           _TOP_VECTOR,
-            "dense_score_threshold": 0.0,
-            "rrf_alpha":            0.6,
-            "ef_search":            100,
-            "rerank_threshold":     0.0,
+            "top_k":                    _TOP_K,
+            "top_vector":               _TOP_VECTOR,
+            "dense_score_threshold":    0.0,
+            "rrf_alpha":                0.6,
+            "ef_search":                100,
+            "rerank_threshold":         0.0,
+            "use_cache":                True,
+            "use_sparse":               True,
+            "use_question_augmentation": True,
         }
 
 
@@ -90,9 +104,11 @@ async def hybrid_retrieve(
             dense_vec = embed_results[0].dense
         sparse_vec = embed_results[0].sparse
 
-    cached = await cache_get(dense_vec)
-    if cached is not None:
-        return cached
+    if cfg["use_cache"]:
+        cached = await cache_get(dense_vec)
+        if cached is not None:
+            logger.debug("Cache hit — skipping retrieval")
+            return cached
 
     pool = await _get_pool()
 
@@ -110,7 +126,7 @@ async def hybrid_retrieve(
     base_rankings = [dense_ids]
     base_weights  = [1.0]
 
-    if sparse_vec and _EMBEDDING_PROVIDER == "local":
+    if sparse_vec and _EMBEDDING_PROVIDER == "local" and cfg["use_sparse"]:
         sparse_rows = await _sparse_search(
             pool, sparse_vec, roles, region, cfg["top_vector"], project_group,
         )
@@ -133,10 +149,13 @@ async def hybrid_retrieve(
     candidates = [row_map[cid] for cid in merged_ids if cid in row_map]
 
     # Question-augmentation: chunks whose LLM-generated questions match the query
-    question_rows = await _question_search(
-        pool, dense_vec, roles, region, cfg["top_vector"], project_group,
-        min_score=cfg["dense_score_threshold"],
-        ef_search=cfg["ef_search"],
+    question_rows = (
+        await _question_search(
+            pool, dense_vec, roles, region, cfg["top_vector"], project_group,
+            min_score=cfg["dense_score_threshold"],
+            ef_search=cfg["ef_search"],
+        )
+        if cfg["use_question_augmentation"] else []
     )
     question_ids = list(dict.fromkeys(r["chunk_id"] for r in question_rows))
 
@@ -189,7 +208,8 @@ async def hybrid_retrieve(
             chunk["score"] = round(rrf_scores.get(cid, 0.0) / max_rrf, 4)
 
     logger.info("Retrieval complete: top_k=%d returned=%d", top_k, len(results))
-    await cache_set(dense_vec, results)
+    if cfg["use_cache"]:
+        await cache_set(dense_vec, results)
     return results
 
 
