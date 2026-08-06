@@ -6,7 +6,7 @@
   "dense_score_threshold": 0.5,
   "chunk_size": 600,
   "chunk_overlap": 80,
-  "use_cache": false,
+  "use_cache": true,
   "use_sparse": true,
   "use_question_augmentation": true,
   "use_small_to_big": true,
