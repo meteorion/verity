@@ -26,14 +26,15 @@ Content-Type: multipart/form-data
 | `doc_type` | string | `null` | FAQ / 操作手册 / 政策说明 / 合同模板 |
 | `category` | string | `null` | 业务分类，如 退款 / 发货 / 会员 |
 | `source_url` | string | `null` | 见下方字段默认值策略 |
-| `product_line` | string | `global` | 逗号分隔，如 `product_a,product_b`；映射到 `Document.group_ids` |
+| `product_line` | string | `global` | 逗号分隔，如 `product_a,product_b`；映射到 `Document.product_line` |
 | `acl` | string | `role:public` | 逗号分隔，如 `role:agent,role:public` |
 | `version` | string | `null` | 文档版本号 |
 | `effective_from` | string | `null` | ISO8601 生效开始时间 |
 | `effective_to` | string | `null` | ISO8601 生效结束时间 |
 | `tags` | string | `null` | 逗号分隔自由标签 |
 
-> **注：** `region` 当前由 chunker 固定为 `["global"]`，请求参数中暂不暴露。
+> **注：** `region` 在 chunk-export 接口中不作为请求参数暴露，默认传入 `["global"]`。
+> 正式入库接口（`/api/pipeline/ingest`）已支持 `region` 参数，需要多 region 预览可用那个接口。
 
 ### 字段默认值策略
 
@@ -164,8 +165,8 @@ async def structure_with_llm(raw_text: str) -> StructuredResult:
 | `source_url` | string\|null | 请求参数 / LLM | 原始文档链接 |
 | `doc_type` | string\|null | 请求参数 / LLM | FAQ / 操作手册 / 政策说明 / 合同模板 |
 | `category` | string\|null | 请求参数 | 业务分类 |
-| `product_line` | string[] | 请求参数（映射自 group_ids） | 适用产品线，默认 `["global"]` |
-| `region` | string[] | chunker 固定 | 当前固定为 `["global"]` |
+| `product_line` | string[] | 请求参数 | 适用产品线，默认 `["global"]` |
+| `region` | string[] | 接口默认 | chunk-export 固定为 `["global"]`；正式入库接口支持自定义 |
 | `acl` | string[] | 请求参数 | 访问权限，默认 `["role:public"]` |
 | `version` | string\|null | 请求参数 | 文档版本号 |
 | `effective_from` | string\|null | 请求参数 | ISO8601 |
@@ -320,15 +321,15 @@ async def chunk_export(
                 title=parsed["metadata"].get("title", _doc_id),
                 owner_email="",          # 工具接口无账号上下文
                 business_line="",
-                group_ids=_csv_list(product_line),
+                product_line=_csv_list(product_line),
                 source_url=source_url,
                 doc_type=doc_type,
-                category=category,
+                default_category=category,
                 acl=_csv_list(acl),
                 version=version,
                 effective_from=_parse_dt(effective_from),
                 effective_to=_parse_dt(effective_to),
-                tags=_csv_list(tags or ""),
+                default_tags=_csv_list(tags or ""),
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
             )
@@ -382,5 +383,5 @@ async def structure_with_llm(raw_text: str) -> StructuredResult:
 - **LLM 上下文限制**：超长文档（> ~3000 tokens 原文）结构化效果不稳定，暂不分窗处理；此类文档建议 `use_llm_structure=false`
 - **`max_tokens` 必须覆盖**：`get_llm()` 默认 `max_tokens=800`，结构化输出需设为 `4096`，否则长文档 Markdown 会被截断
 - **`owner_email` / `business_line`**：`Document` 的必填字段，工具接口无账号上下文，传空字符串；这两个字段不写 DB（`dry_run=True`），不影响 chunk 输出
-- **`region` 固定为 `["global"]`**：当前 `chunk_document` 内部硬编码，如需支持多 region 需改 `Document` 模型和 chunker
+- **`region` 固定为 `["global"]`**：chunk-export 接口不接受 region 参数，始终传 `["global"]`；正式入库（`/api/pipeline/ingest`）已支持 region
 - **`chunk_id` 格式**：`{doc_id}#{section_idx:03d}_{chunk_idx:03d}`，与正式索引后的 ID 格式一致，可直接用于导入

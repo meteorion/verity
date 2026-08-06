@@ -154,18 +154,24 @@ sequenceDiagram
 1. 按标题树（H1→H4）切出逻辑单元；
 2. 单元过大时按段落递归切分，目标长度 **400~800 tokens**，重叠 **10%~15%**；
 3. 每个 chunk 前置"面包屑上下文"（文档名 > 一级标题 > 二级标题），显著提升检索准确性；
-4. 保留父子关系，实现 **Small-to-Big**：用小 chunk 检索，把父级大块喂给 LLM。主流向量库不原生支持关联查询，实现方式为：小 chunk 元数据中存 `parent_chunk_id`，检索命中后在应用层按 parent_chunk_id 回查文档存储（本地文件系统，存储层通过抽象接口访问）取父级内容，**不再次走向量检索**。
+4. 保留父子关系，实现 **Small-to-Big**：用小 chunk 检索，把父级大块喂给 LLM。父 chunk（`is_parent=TRUE`）与子 chunk 存在同一张 `chunks` 表，子 chunk 元数据中存 `parent_chunk_id`，检索命中后在应用层（`retrieval/small_to_big.py`）按 `parent_chunk_id` 回查数据库取父级内容，**不再次走向量检索**。
 
 Chunk 元数据规范：
 
 ```json
 {
-  "chunk_id": "doc_10231#p3_c02",
+  "chunk_id": "doc_10231#003_001",
   "doc_id": "doc_10231",
+  "parent_chunk_id": "doc_10231#003_parent",
+  "chunk_index": 1,
+  "is_parent": false,
   "title": "退换货政策",
   "breadcrumb": "售后手册 > 退换货 > 生鲜类目",
-  "content": "生鲜商品自签收之日起 24 小时内可申请...",
+  "content": "售后手册 > 退换货 > 生鲜类目:\n生鲜商品自签收之日起 24 小时内可申请...",
   "source_url": "https://kb.example.com/doc/10231#sec3",
+  "doc_type": "操作手册",
+  "category": "售后",
+  "tags": ["退换货", "生鲜"],
   "product_line": ["retail"],
   "region": ["CN-mainland"],
   "version": "2026-06",

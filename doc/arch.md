@@ -219,7 +219,7 @@ sequenceDiagram
     end
     A  ->> A  : [retrieval] RRF 融合（k=60）→ 候选 ~80 条
     A  ->> A  : [inference] Rerank 精排 → Top-6（分数 ≥ 阈值）
-    A  ->> A  : [retrieval] Small-to-Big：按 parent_chunk_id 读本地 FS 父级内容
+    A  ->> A  : [retrieval] Small-to-Big：按 parent_chunk_id 回查 chunks 表父 chunk
 
     A  ->> A  : [graph] 组装 Prompt（知识≤60% / 历史≤20% / 指令≤20%）
     A  ->> LG : 流式生成请求（temperature=0.2）
@@ -253,11 +253,10 @@ sequenceDiagram
     A    ->> A  : PII 识别与脱敏
     A    ->> A  : [pipeline] 层级化切分（chunk_size=600，overlap=80）
     A    ->> A  : 生成面包屑 + 元数据（acl/region/effective_from/to）
-    A    ->> FS : 写父级 chunk 文件（parent_path 存入元数据）
-    A    ->> A  : [inference] BGE-M3 批量 Embedding（密集 + 稀疏）
+    A    ->> A  : [inference] BGE-M3 批量 Embedding（密集 + 稀疏，父 chunk 不做 Embedding）
 
-    A    ->> PG : 删除旧版 chunk（按 doc_id + version）
-    A    ->> PG : 插入新 chunk（含向量 + 元数据）
+    A    ->> PG : 删除旧版 chunk（按 doc_id + version，清理 stale chunk）
+    A    ->> PG : 插入新 chunk（子 chunk 含向量 + 元数据；父 chunk is_parent=TRUE 不含向量）
     A    ->> RC : 清理该文档关联的语义缓存 key
 
     Note over A,PG : 文本型文档端到端 ≤ 15min<br/>扫描 PDF（含 OCR）≤ 30min
@@ -364,10 +363,10 @@ stateDiagram-v2
 
 6. Rerank（Cross-Encoder，阈值过滤）→ Top-6
 
-7. Small-to-Big 扩展
+7. Small-to-Big 扩展（见 retrieval/small_to_big.py）
    for chunk in top_k:
      if chunk.parent_chunk_id:
-       chunk.context = fs.read(chunk.parent_path)
+       chunk.context = pg.query("SELECT content FROM chunks WHERE chunk_id=$1", chunk.parent_chunk_id)
 
 8. 写语义缓存（TTL 3600s）
 ```
@@ -385,45 +384,50 @@ flowchart LR
     G --> H[表格抽取 + 补写摘要]
     H --> I[层级化切分\nH1→H4 + 段落递归]
     I --> J[面包屑注入\n+ 元数据填充]
-    J --> K[写父级内容到 FS]
-    K --> L[BGE-M3 批量\n密集+稀疏向量化]
+    J --> L[BGE-M3 批量\n密集+稀疏向量化\n父 chunk 不做 Embedding]
     L --> M[删旧版 chunk → 写新 chunk]
     M --> N[清理关联语义缓存]
 ```
 
 #### Chunk 元数据 Schema
 
-> 实际建表 DDL 见 `app/db.py`（幂等 `CREATE TABLE IF NOT EXISTS`，P1 暂不引入迁移框架）。
-> `embedding` 维度取决于 Embedding 选型：P1 默认 sentence-transformers 的
-> `paraphrase-multilingual-MiniLM-L12-v2`（384 维，只有密集向量），下面的 `vector(1024)` /
-> `sparse_vector` 是 P0 正式选定 BGE-M3 类模型后的目标形态，换模型需要重建索引（蓝绿策略，见 §5.4）。
+> 实际建表 DDL 见 `app/db.py`（幂等 DDL + ALTER TABLE 迁移块，P1 暂不引入迁移框架）。
+> `embedding` 维度由 `EMBEDDING_DIM` 环境变量控制（默认 384，切换模型后需蓝绿重建索引，见 §5.4）。
 
 ```sql
 CREATE TABLE chunks (
-    chunk_id        TEXT PRIMARY KEY,           -- "doc_10231#p3_c02"
-    doc_id          TEXT NOT NULL,
-    parent_chunk_id TEXT,
-    parent_path     TEXT,                       -- 本地 FS 路径
+    chunk_id        TEXT PRIMARY KEY,           -- "{doc_id}#{section_idx:03d}_{chunk_idx:03d}"
+    doc_id          TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    parent_chunk_id TEXT REFERENCES chunks(chunk_id) ON DELETE SET NULL,
     title           TEXT,
     breadcrumb      TEXT,                       -- "售后手册 > 退换货 > 生鲜类目"
-    content         TEXT NOT NULL,
+    content         TEXT NOT NULL,              -- 检索 chunk 前缀包含 breadcrumb；父 chunk 为原始 body
     source_url      TEXT,
-    product_line    TEXT[],
-    region          TEXT[],
+    product_line    TEXT[] DEFAULT '{global}',  -- 来自 documents.product_line，入库时同步
+    region          TEXT[] DEFAULT '{global}',
     version         TEXT,
     effective_from  TIMESTAMPTZ,
     effective_to    TIMESTAMPTZ,
-    acl             TEXT[],
-    updated_at      TIMESTAMPTZ NOT NULL,
-    embedding       vector(1024),               -- BGE-M3 密集向量（P0 选型确定后的目标维度）
-    sparse_vector   sparsevec(30522)            -- BGE-M3 稀疏向量（P2 混合检索才用到）
+    acl             TEXT[] DEFAULT '{role:public}',
+    doc_type        TEXT,
+    category        TEXT,
+    tags            TEXT[] DEFAULT '{}',
+    chunk_index     INT DEFAULT 0,              -- 节内顺序；父 chunk 为 -1（哨兵，不参与排序）
+    is_parent       BOOL DEFAULT FALSE,         -- TRUE = 父 chunk（存完整节 body，不做 embedding）
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    embedding       vector(384),               -- 维度由 EMBEDDING_DIM 控制，默认 384
+    sparse_vector   sparsevec(30522)           -- BGE-M3 稀疏向量（local 模式下填充）
 );
 
 CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m=16, ef_construction=200);
 CREATE INDEX ON chunks (doc_id, version);
-CREATE INDEX ON chunks (effective_to) WHERE effective_to IS NOT NULL;
+CREATE INDEX ON chunks (is_parent) WHERE is_parent = FALSE;
 ```
+
+> **父 chunk 存储说明**：父 chunk（`is_parent=TRUE`）与子 chunk 存在同一张表，通过 `parent_chunk_id` 关联。
+> 检索只查 `is_parent=FALSE` 的子 chunk；命中后通过 `small_to_big.py` 按 `parent_chunk_id` 回查父 chunk 内容。
+> 无文件系统存储，`/data/rag/chunks/` 目录已废弃。
 
 ### 5.4 inference/（模型推理，进程内加载）
 
@@ -474,20 +478,27 @@ CREATE TABLE session_logs (
 CREATE INDEX ON session_logs (session_id);
 CREATE INDEX ON session_logs (uid, created_at);
 
--- 文档元数据
+-- 文档元数据（完整字段见 app/db.py）
 CREATE TABLE documents (
     doc_id          TEXT PRIMARY KEY,
     title           TEXT NOT NULL,
     owner_email     TEXT,
-    business_line   TEXT,
-    source_type     TEXT,
+    business_line   TEXT,                           -- 自由文本，不参与检索过滤
+    source_type     TEXT DEFAULT 'upload',
     source_path     TEXT,
-    admission_score INT,
-    status          TEXT,          -- active / pending / rejected / expired
+    source_url      TEXT DEFAULT '',
+    admission_score INT  DEFAULT 100,
+    status          TEXT DEFAULT 'pending'          -- pending / active / rejected
+                    CHECK (status IN ('pending', 'active', 'rejected')),
     version         TEXT,
     effective_from  TIMESTAMPTZ,
     effective_to    TIMESTAMPTZ,
-    updated_at      TIMESTAMPTZ
+    acl             TEXT[] DEFAULT '{role:public}',
+    product_line    TEXT[] DEFAULT '{global}',      -- 前身为 group_ids，已统一命名
+    doc_type        TEXT,
+    chunk_size      INT,
+    chunk_overlap   INT,
+    updated_at      TIMESTAMPTZ DEFAULT now()
 );
 ```
 
@@ -515,16 +526,17 @@ faq:{id}                      Hash   { question, answer, intent, product_line }
 ```
 /data/rag/
 ├── raw/
-│   └── {doc_id}/original.{ext}
-├── chunks/
-│   └── {doc_id}/{parent_chunk_id}.txt
+│   └── {doc_id}/original.{ext}      # 原始上传文件
 ├── parsed/
-│   └── {doc_id}/parsed.json
+│   └── {doc_id}/parsed.json          # Marker/OCR 输出，供调试
+├── exports/
+│   └── {job_id}.{json|jsonl}         # chunk_export 工具输出
 └── ocr_queue/
-    └── {doc_id}_{page}.png
+    └── {doc_id}_{page}.png           # OCR 队列
 ```
 
-**路径抽象**：所有路径通过 `StorageClient`（`read` / `write` / `exists`）访问，后续迁移对象存储时只改实现类。
+> **父 chunk 不写文件系统**：父 chunk 内容存储在 `chunks` 表（`is_parent=TRUE`），通过
+> `parent_chunk_id` 关联，`/data/rag/chunks/` 目录已废弃。
 
 ---
 
