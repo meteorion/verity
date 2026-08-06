@@ -75,7 +75,9 @@ function ModelTab() {
         <ConfigCard
           title="大语言模型" tag="LLM" tagColor="blue" loading={!settings}
           fields={settings ? [
-            { label: '模型',        value: settings.llm_model },
+            { label: 'Provider',    value: settings.llm_provider },
+            { label: '主模型',      value: settings.llm_model },
+            { label: '快速模型',    value: settings.llm_fast_model },
             { label: 'API',         value: settings.llm_api_base, mono: true, truncate: true },
             { label: 'Key',         value: settings.llm_api_key_masked, mono: true },
             { label: 'Max Tokens',  value: settings.llm_max_tokens },
@@ -196,10 +198,12 @@ function ConfigCard({ title, tag, tagColor, fields, onEdit, loading }) {
 
 function LLMEditModal({ initial, onClose, onSaved }) {
   const [form, setForm] = useState({
-    llm_model: initial?.llm_model ?? '',
-    llm_api_base: initial?.llm_api_base ?? '',
-    llm_api_key: '',
-    llm_max_tokens: initial?.llm_max_tokens ?? 800,
+    llm_provider:    initial?.llm_provider    ?? 'openai',
+    llm_model:       initial?.llm_model       ?? '',
+    llm_fast_model:  initial?.llm_fast_model  ?? '',
+    llm_api_base:    initial?.llm_api_base    ?? '',
+    llm_api_key:     '',
+    llm_max_tokens:  initial?.llm_max_tokens  ?? 800,
     llm_temperature: initial?.llm_temperature ?? 0.2,
   })
   const [saving, setSaving] = useState(false)
@@ -217,7 +221,19 @@ function LLMEditModal({ initial, onClose, onSaved }) {
 
   return (
     <EditModal title="编辑 LLM 配置" onClose={onClose} onSave={save} saving={saving} error={error}>
-      <FormRow label="模型名称"><Input value={form.llm_model} onChange={v => set('llm_model', v)} placeholder="qwen-plus" /></FormRow>
+      <FormRow label="Provider">
+        <select value={form.llm_provider} onChange={e => set('llm_provider', e.target.value)}
+          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300">
+          <option value="openai">openai（兼容 DashScope / SiliconFlow / vLLM）</option>
+          <option value="litellm">litellm（统一网关）</option>
+        </select>
+      </FormRow>
+      <div className="grid grid-cols-2 gap-4">
+        <FormRow label="主模型"><Input value={form.llm_model} onChange={v => set('llm_model', v)} placeholder="qwen-plus" /></FormRow>
+        <FormRow label="快速模型" hint="rewrite/expand 用，留空同主模型">
+          <Input value={form.llm_fast_model} onChange={v => set('llm_fast_model', v)} placeholder="qwen-turbo" />
+        </FormRow>
+      </div>
       <FormRow label="API Base URL"><Input value={form.llm_api_base} onChange={v => set('llm_api_base', v)} /></FormRow>
       <FormRow label="API Key" hint={initial?.llm_api_key_masked || '未配置'}>
         <Input type="password" value={form.llm_api_key} onChange={v => set('llm_api_key', v)} placeholder="留空保留原密钥" />

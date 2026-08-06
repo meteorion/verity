@@ -1,26 +1,60 @@
 """Unified LangChain chat model factory.
 
-get_llm() returns a configured ChatOpenAI based on LLM_PROVIDER:
-  openai  (default) → ChatOpenAI (any OpenAI-compatible endpoint, e.g. DashScope)
-  litellm           → ChatOpenAI pointing at LiteLLM gateway
+get_llm() reads config from settings.json at call time (env-var fallback),
+so admin-UI changes take effect on the next request without a restart.
 
-Instances are cached by (provider, model, max_tokens, temperature) so the
-underlying httpx.AsyncClient and its connection pool are reused across requests.
-The streaming flag is intentionally excluded from the cache key — LangChain
-ChatOpenAI supports both .ainvoke() and .astream() on the same instance.
+Instance cache: keyed by (provider, api_base, model, max_tokens, temperature).
+Same key → same ChatOpenAI → same httpx.AsyncClient → connection pool reused.
 """
 import os
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
-_MODEL         = os.getenv("LLM_MODEL", "qwen-plus")
-_FAST_MODEL    = os.getenv("LLM_FAST_MODEL", "")   # optional cheaper model for rewrite/expand
-_MAX_TOKENS    = int(os.getenv("LLM_MAX_TOKENS", "800"))
-_TEMPERATURE   = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-
 _cache: dict[tuple[Any, ...], ChatOpenAI] = {}
+
+
+def _llm_cfg() -> dict:
+    """Effective LLM config: settings.json first, env-var fallback."""
+    try:
+        from api.settings import load_settings
+        s = load_settings()
+    except Exception:
+        s = {}
+
+    def _s(key: str, env: str, default: str = "") -> str:
+        return s.get(key) or os.getenv(env, default)
+
+    primary = _s("llm_model", "LLM_MODEL", "qwen-plus")
+    return {
+        "provider":   _s("llm_provider",   "LLM_PROVIDER",  "openai"),
+        "model":      primary,
+        "fast_model": _s("llm_fast_model", "LLM_FAST_MODEL", "") or primary,
+        "api_base":   _s("llm_api_base",   "LLM_API_BASE",  "https://api.openai.com/v1"),
+        "api_key":    s.get("llm_api_key") or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", ""),
+        "max_tokens": int(s.get("llm_max_tokens") or os.getenv("LLM_MAX_TOKENS", "800")),
+        "temperature": float(s.get("llm_temperature") or os.getenv("LLM_TEMPERATURE", "0.2")),
+        "litellm_url": os.getenv("LITELLM_URL", "http://litellm:4000"),
+        "litellm_key": os.getenv("LITELLM_MASTER_KEY", "sk-litellm"),
+    }
+
+
+def _make_instance(cfg: dict, model: str, max_tokens: int, temperature: float) -> ChatOpenAI:
+    if cfg["provider"] == "litellm":
+        return ChatOpenAI(
+            model=model,
+            api_key=cfg["litellm_key"],
+            base_url=cfg["litellm_url"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    return ChatOpenAI(
+        model=model,
+        api_key=cfg["api_key"],
+        base_url=cfg["api_base"],
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
 
 
 def get_llm(
@@ -28,39 +62,18 @@ def get_llm(
     model: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
-    streaming: bool = False,
 ) -> ChatOpenAI:
-    """Return a cached ChatOpenAI instance for the given parameters."""
-    _model     = model or _MODEL
-    _max_tokens = max_tokens if max_tokens is not None else _MAX_TOKENS
-    _temp      = temperature if temperature is not None else _TEMPERATURE
+    """Return a cached ChatOpenAI instance. Config is read from settings + env each call."""
+    cfg = _llm_cfg()
+    _model      = model      or cfg["model"]
+    _max_tokens = max_tokens if max_tokens  is not None else cfg["max_tokens"]
+    _temp       = temperature if temperature is not None else cfg["temperature"]
 
-    cache_key = (_LLM_PROVIDER, _model, _max_tokens, _temp)
+    cache_key = (cfg["provider"], cfg["api_base"], _model, _max_tokens, _temp)
     if cache_key in _cache:
         return _cache[cache_key]
 
-    if _LLM_PROVIDER == "litellm":
-        litellm_url = os.getenv("LITELLM_URL", "http://litellm:4000")
-        master_key  = os.getenv("LITELLM_MASTER_KEY", "sk-litellm")
-        instance = ChatOpenAI(
-            model=_model,
-            api_key=master_key,
-            base_url=litellm_url,
-            max_tokens=_max_tokens,
-            temperature=_temp,
-        )
-    else:
-        # openai-compatible (default) — DashScope, SiliconFlow, local vLLM, etc.
-        api_base = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
-        api_key  = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-        instance = ChatOpenAI(
-            model=_model,
-            api_key=api_key,
-            base_url=api_base,
-            max_tokens=_max_tokens,
-            temperature=_temp,
-        )
-
+    instance = _make_instance(cfg, _model, _max_tokens, _temp)
     _cache[cache_key] = instance
     return instance
 
@@ -70,14 +83,6 @@ def get_fast_llm(
     max_tokens: int | None = None,
     temperature: float | None = None,
 ) -> ChatOpenAI:
-    """Return a cached instance of the fast/cheap model (LLM_FAST_MODEL).
-
-    Falls back to the primary model when LLM_FAST_MODEL is not set,
-    so callers never need to branch on whether a fast model is configured.
-    Used for lightweight tasks: query rewrite, multi-query expansion, etc.
-    """
-    return get_llm(
-        model=_FAST_MODEL or _MODEL,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    """Cached instance of the fast/cheap model (llm_fast_model). Falls back to primary."""
+    cfg = _llm_cfg()
+    return get_llm(model=cfg["fast_model"], max_tokens=max_tokens, temperature=temperature)

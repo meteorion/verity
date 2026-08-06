@@ -49,7 +49,9 @@ def _mask(key: str) -> str:
 
 
 class SettingsRead(BaseModel):
+    llm_provider: str
     llm_model: str
+    llm_fast_model: str
     llm_api_base: str
     llm_api_key_masked: str
     llm_max_tokens: int
@@ -73,7 +75,9 @@ class SettingsRead(BaseModel):
 
 
 class SettingsWrite(BaseModel):
+    llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
+    llm_fast_model: Optional[str] = None
     llm_api_base: Optional[str] = None
     llm_api_key: Optional[str] = None
     llm_max_tokens: Optional[int] = None
@@ -124,8 +128,11 @@ async def get_settings():
     llm_key = _str("llm_api_key", "LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
     emb_key = _str("embedding_api_key", "EMBEDDING_API_KEY") or llm_key
 
+    primary_model = _str("llm_model", "LLM_MODEL", "qwen-plus")
     return SettingsRead(
-        llm_model=_str("llm_model", "LLM_MODEL", "qwen-plus"),
+        llm_provider=_str("llm_provider", "LLM_PROVIDER", "openai"),
+        llm_model=primary_model,
+        llm_fast_model=_str("llm_fast_model", "LLM_FAST_MODEL", "") or primary_model,
         llm_api_base=_str(
             "llm_api_base", "LLM_API_BASE",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",

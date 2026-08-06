@@ -109,9 +109,11 @@ async def generate_node(state: OrchestratorState) -> dict:
     if temperature is None:
         temperature = _TEMPERATURE
 
+    from inference.llm import get_llm as _get_llm
+    _llm_instance = _get_llm(temperature=temperature)
     logger.info(
-        "Calling LLM [session=%s provider=%s model=%s chunks=%d tool_results=%d temperature=%s]",
-        state.get("session_id"), _LLM_PROVIDER, _MODEL, len(chunks), len(tool_results), temperature,
+        "Calling LLM [session=%s model=%s chunks=%d tool_results=%d temperature=%s]",
+        state.get("session_id"), _llm_instance.model_name, len(chunks), len(tool_results), temperature,
     )
     session_id = state.get("session_id", "")
     try:
