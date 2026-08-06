@@ -5,5 +5,14 @@
   "rerank_threshold": 0.6,
   "dense_score_threshold": 0.5,
   "chunk_size": 600,
-  "chunk_overlap": 80
+  "chunk_overlap": 80,
+  "use_cache": false,
+  "use_sparse": true,
+  "use_question_augmentation": true,
+  "use_small_to_big": true,
+  "llm_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "llm_max_tokens": 1500,
+  "llm_temperature": 0.2,
+  "llm_fast_model": "qwen-turbo",
+  "llm_provider": "openai"
 }

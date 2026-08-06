@@ -169,7 +169,7 @@ export default function KnowledgeBase() {
         (filter === 'rejected' && d.status === 'rejected') ||
         (filter === 'expired' && d.status === 'expired')
       const matchDocType = !docTypeFilter || d.doc_type === docTypeFilter
-      const matchGroup = !groupFilter || (d.group_ids ?? []).includes(groupFilter)
+      const matchGroup = !groupFilter || (d.product_line ?? []).includes(groupFilter)
       const matchKw = !keyword || d.title.includes(keyword) || d.doc_id.includes(keyword)
       return matchFilter && matchDocType && matchGroup && matchKw
     })
@@ -394,7 +394,7 @@ export default function KnowledgeBase() {
                   </td>
                   <td className="px-2 py-2.5">
                     <div className="flex flex-wrap gap-1">
-                      {(d.group_ids ?? []).map((gid) => (
+                      {(d.product_line ?? []).map((gid) => (
                         <span key={gid} className="px-1.5 py-0.5 rounded text-[10px] bg-indigo-50 text-indigo-600 font-medium">
                           {groupLabels[gid] ?? gid}
                         </span>
@@ -589,7 +589,7 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, onGroupsChange }) {
   const [showChunks, setShowChunks] = useState(false)
   const [showAdmission, setShowAdmission] = useState(false)
   const [showSource, setShowSource] = useState(false)
-  const docGroupIds = doc?.group_ids ?? []
+  const docGroupIds = doc?.product_line ?? []
   const docAcl = doc?.acl ?? ['role:public']
 
   async function toggleAcl(role) {
@@ -616,7 +616,7 @@ function DetailPanel({ doc, onDisable, onDelete, onRebuild, onGroupsChange }) {
       await apiFetch(`/api/ops/documents/${doc.doc_id}/groups`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ group_ids: final }),
+        body: JSON.stringify({ product_line: final }),
       })
       onGroupsChange()
     } finally {
@@ -835,7 +835,7 @@ function UploadModal({ onClose, onSuccess }) {
       fd.append('doc_id', docId)
       fd.append('owner', owner)
       if (docType) fd.append('doc_type', docType)
-      fd.append('group_ids', selectedGroups.join(','))
+      fd.append('product_line', selectedGroups.join(','))
       fd.append('acl_roles', selectedAcl.join(','))
       if (sourceUrl.trim()) fd.append('source_url', sourceUrl.trim())
       fd.append('version', version.trim() || '1.0')

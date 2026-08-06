@@ -360,6 +360,8 @@ function RetrievalFlagsEditModal({ initial, onClose, onSaved }) {
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [clearing, setClearing] = useState(false)
+  const [clearMsg, setClearMsg] = useState('')
 
   function toggle(k) { setForm(f => ({ ...f, [k]: !f[k] })) }
 
@@ -367,6 +369,20 @@ function RetrievalFlagsEditModal({ initial, onClose, onSaved }) {
     setSaving(true); setError('')
     try { await saveSettings(form); onSaved() }
     catch (e) { setError(e.message) } finally { setSaving(false) }
+  }
+
+  async function clearCache() {
+    setClearing(true); setClearMsg('')
+    try {
+      const res = await apiFetch('/api/settings/cache', { method: 'DELETE' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setClearMsg(`已清空 ${data.deleted} 条缓存`)
+    } catch (e) {
+      setClearMsg(`清空失败：${e.message}`)
+    } finally {
+      setClearing(false)
+    }
   }
 
   const FLAGS = [
@@ -389,6 +405,26 @@ function RetrievalFlagsEditModal({ initial, onClose, onSaved }) {
             <Toggle checked={form[key]} onChange={() => toggle(key)} />
           </div>
         ))}
+      </div>
+      <div className="mt-5 pt-4 border-t border-slate-100">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-slate-700">清空缓存</p>
+            <p className="text-xs text-slate-400 mt-0.5">删除所有检索缓存与语义答案缓存（cache:q:* 和 semantic_cache:*）</p>
+          </div>
+          <button
+            onClick={clearCache}
+            disabled={clearing}
+            className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {clearing ? '清空中…' : '立即清空'}
+          </button>
+        </div>
+        {clearMsg && (
+          <p className={`mt-2 text-xs ${clearMsg.startsWith('清空失败') ? 'text-red-500' : 'text-emerald-600'}`}>
+            {clearMsg}
+          </p>
+        )}
       </div>
     </EditModal>
   )

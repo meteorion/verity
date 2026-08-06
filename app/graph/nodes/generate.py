@@ -194,7 +194,7 @@ async def _call_llm(messages: list[dict], temperature: float, system_prompt: str
         else:
             lc_messages.append(AIMessage(content=msg["content"]))
 
-    llm = get_llm(temperature=temperature, streaming=True)
+    llm = get_llm(temperature=temperature)
     parts: list[str] = []
     async for chunk in llm.astream(lc_messages):
         content = chunk.content

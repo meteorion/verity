@@ -84,6 +84,7 @@ async def _llm_rewrite(query: str, history: list[dict]) -> str:
     )
     user = f"对话历史：\n{history_text}\n\n用户最新问题：{query}\n\n改写后的问题："
     llm = get_fast_llm(max_tokens=120, temperature=0.0)
+    logger.debug("Rewrite LLM [model=%s]", llm.model_name)
     resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
     content = resp.content
     if isinstance(content, list):
@@ -179,6 +180,7 @@ async def _multi_query_expand(query: str, n: int = 3) -> list[str]:
     )
     user = f"问题：{query}"
     llm = get_fast_llm(max_tokens=200, temperature=0.3)
+    logger.debug("Expand LLM [model=%s]", llm.model_name)
     resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
     content = resp.content
     if isinstance(content, list):

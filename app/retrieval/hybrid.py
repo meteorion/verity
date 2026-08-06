@@ -148,11 +148,15 @@ async def hybrid_retrieve(
     merged_ids, rrf_scores = _rrf_merge(base_rankings, weights=base_weights)
     candidates = [row_map[cid] for cid in merged_ids if cid in row_map]
 
-    # Question-augmentation: chunks whose LLM-generated questions match the query
+    # Question-augmentation: chunks whose LLM-generated questions match the query.
+    # Uses a lower threshold than dense content (0.3 vs dense_score_threshold) so
+    # semantically-paraphrased queries still match, while completely unrelated
+    # queries don't pull in question-matched chunks from unrelated documents.
+    _Q_MIN_SCORE = 0.3
     question_rows = (
         await _question_search(
             pool, dense_vec, roles, region, cfg["top_vector"], project_group,
-            min_score=cfg["dense_score_threshold"],
+            min_score=_Q_MIN_SCORE,
             ef_search=cfg["ef_search"],
         )
         if cfg["use_question_augmentation"] else []
@@ -163,7 +167,13 @@ async def hybrid_retrieve(
         for r in question_rows:
             if r["chunk_id"] not in row_map:
                 row_map[r["chunk_id"]] = dict(r)
-            cosine_chunk_ids.add(r["chunk_id"])  # question scores are cosine — threshold applies
+                # Chunk found by question search but outside the dense top-N window:
+                # append it to the dense ranking so RRF gives it a last-place dense slot
+                # rather than zero contribution from that dimension.
+                dense_ids.append(r["chunk_id"])
+            # Do NOT add to cosine_chunk_ids: question similarity != chunk content similarity.
+            # These chunks are already quality-gated by HNSW ranking; applying dense_score_threshold
+            # here would incorrectly reject question-matched chunks when dense scores are low.
         # Scale base weights to 0.7, question contribution = 0.3
         scale = 0.7 / sum(base_weights)
         final_ids, rrf_scores = _rrf_merge(

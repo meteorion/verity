@@ -232,3 +232,27 @@ async def update_settings(body: SettingsWrite):
     save_settings(s)
     reset_evaluator()
     logger.info("Settings saved. Fields updated: %s", list(updates.keys()))
+
+
+@router.delete("/cache", status_code=200)
+async def clear_cache():
+    """Clear all runtime caches: retrieval cache (cache:q:*) and semantic answer cache (semantic_cache:*)."""
+    import redis.asyncio as aioredis
+    from fastapi import HTTPException
+
+    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    deleted = 0
+    try:
+        rc = aioredis.from_url(redis_url)
+        async with rc:
+            async for key in rc.scan_iter("cache:q:*"):
+                await rc.delete(key)
+                deleted += 1
+            async for key in rc.scan_iter("semantic_cache:*"):
+                await rc.delete(key)
+                deleted += 1
+    except Exception as exc:
+        logger.warning("Cache clear failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+    logger.info("Cache cleared: %d keys deleted", deleted)
+    return {"deleted": deleted}
