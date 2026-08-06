@@ -241,6 +241,10 @@ export default function ChatArea({ conv, onMessage, onToggleSidebar }) {
             } catch {}
             continue
           }
+          if (payload.startsWith('[META]')) {
+            // Backend telemetry (cache_hit/faq_hit/intent/latency) — not shown in the UI.
+            continue
+          }
           try {
             const token = JSON.parse(payload)
             setLocalMsgs(prev => prev.map(m => m.id === asstId ? { ...m, text: m.text + token } : m))
