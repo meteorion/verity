@@ -34,8 +34,13 @@ export default function App() {
     if (activeId === id) { setActiveId(null); saveActiveId(null) }
   }
 
-  // Called by ChatArea whenever messages change
+  // Called by ChatArea whenever messages change (including once per streamed
+  // token, for the conversation currently being sent). Only activate the
+  // conversation when it's brand new — otherwise, since this fires
+  // continuously while streaming, switching to a different history
+  // conversation mid-stream would get yanked right back by the next token.
   function handleMessage(sessionId, messages, firstQuery) {
+    let isNew = false
     setConvs(prev => {
       const existing = prev.find(c => c.id === sessionId)
       let updated
@@ -44,6 +49,7 @@ export default function App() {
           c.id === sessionId ? { ...c, messages, updatedAt: Date.now() } : c
         )
       } else {
+        isNew = true
         const title = deriveTitle(firstQuery || messages.find(m => m.role === 'user')?.text || '新对话')
         updated = [
           { id: sessionId, title, messages, createdAt: Date.now(), updatedAt: Date.now() },
@@ -53,8 +59,10 @@ export default function App() {
       saveConvs(updated)
       return updated
     })
-    setActiveId(sessionId)
-    saveActiveId(sessionId)
+    if (isNew) {
+      setActiveId(sessionId)
+      saveActiveId(sessionId)
+    }
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────

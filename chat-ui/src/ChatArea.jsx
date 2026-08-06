@@ -14,7 +14,16 @@ const MD_COMPONENTS = {
   strong:     ({ children }) => <strong className="font-semibold text-slate-900">{children}</strong>,
   em:         ({ children }) => <em className="italic">{children}</em>,
   blockquote: ({ children }) => <blockquote className="border-l-2 border-slate-300 pl-3 my-2 text-slate-500 italic">{children}</blockquote>,
-  a:          ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline break-all">{children}</a>,
+  a: ({ href, children }) => {
+    if (href?.startsWith('#ref-')) {
+      return (
+        <a href={href} className="inline-flex items-center justify-center w-4 h-4 mx-0.5 rounded-full bg-indigo-50 text-indigo-500 font-semibold text-[10px] align-super no-underline hover:bg-indigo-100">
+          {children}
+        </a>
+      )
+    }
+    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline break-all">{children}</a>
+  },
   hr:         () => <hr className="my-3 border-slate-200" />,
   code:       ({ inline, className, children }) => inline
     ? <code className="px-1 py-0.5 rounded bg-slate-100 text-slate-700 text-xs font-mono">{children}</code>
@@ -26,11 +35,20 @@ const MD_COMPONENTS = {
 
 // ── Citation helpers ──────────────────────────────────────────────────────
 
-function MarkdownContent({ text, streaming }) {
+// Turns a literal "[2]" the model wrote into a markdown link anchored to that
+// message's matching source card (`ref-<msgId>-2`), so the number becomes a
+// clickable badge instead of inert text. Scoped per-message since ref indices
+// restart at 1 every turn — without the msgId prefix, two messages both
+// citing "[2]" would collide on the same #ref-2 DOM id.
+function linkifyCitations(text, msgId) {
+  return text.replace(/\[(\d+)\]/g, (_, n) => `[${n}](#ref-${msgId}-${n})`)
+}
+
+function MarkdownContent({ text, streaming, msgId }) {
   return (
     <div className="text-sm text-slate-800">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-        {text}
+        {linkifyCitations(text, msgId)}
       </ReactMarkdown>
       {streaming && (
         <span className="inline-block w-0.5 h-3.5 bg-indigo-400 ml-0.5 align-text-bottom animate-pulse" />
@@ -39,7 +57,7 @@ function MarkdownContent({ text, streaming }) {
   )
 }
 
-function Sources({ refs }) {
+function Sources({ refs, msgId }) {
   if (!refs.length) return null
   return (
     <div className="mt-3 pt-3 border-t border-slate-100 space-y-1.5">
@@ -49,7 +67,7 @@ function Sources({ refs }) {
       {refs.map((ref) => {
         const label = ref.breadcrumb?.split(' > ')[0].trim() || ref.title || `来源 ${ref.idx}`
         return (
-          <div key={ref.idx} className="flex items-start gap-2 text-xs">
+          <div key={ref.idx} id={`ref-${msgId}-${ref.idx}`} className="ref-card flex items-start gap-2 text-xs px-1 py-0.5 -mx-1">
             <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-indigo-50 text-indigo-500 font-semibold text-[10px] mt-px">
               {ref.idx}
             </span>
@@ -95,8 +113,8 @@ function AssistantMessage({ msg }) {
       <div className="flex-1 min-w-0 pt-0.5">
         {msg.text ? (
           <>
-            <MarkdownContent text={msg.text} streaming={!msg.done} />
-            {msg.done && <Sources refs={msg.refs} />}
+            <MarkdownContent text={msg.text} streaming={!msg.done} msgId={msg.id} />
+            {msg.done && <Sources refs={msg.refs} msgId={msg.id} />}
           </>
         ) : (
           <span className="inline-flex items-center gap-1 text-slate-400 text-sm">
@@ -156,14 +174,24 @@ export default function ChatArea({ conv, onMessage, onToggleSidebar }) {
   const inputRef         = useRef(null)
   const textareaRef      = useRef(null)
   const sendingSessionRef = useRef(null)  // tracks the session currently being sent
+  const activeIdRef       = useRef(conv?.id)  // mirrors conv?.id for use inside send()'s async loop
+
+  useEffect(() => { activeIdRef.current = conv?.id }, [conv?.id])
 
   // Sync messages when user switches to a DIFFERENT conversation from sidebar.
   // Skip when conv.id matches the session we just created in send().
   useEffect(() => {
     if (sendingSessionRef.current && sendingSessionRef.current === conv?.id) return
+    if (sendingSessionRef.current) {
+      // Switching away from whatever was sending — cancel it and clear the
+      // guard immediately (not just in send()'s finally) so a quick switch
+      // back to it before that finally runs doesn't get suppressed by this
+      // same guard and end up stuck showing the conversation we just left.
+      abortRef.current?.abort()
+      sendingSessionRef.current = null
+    }
     setLocalMsgs(conv?.messages || [])
     setStreaming(false)
-    abortRef.current?.abort()
   }, [conv?.id])
 
   useEffect(() => {
@@ -190,12 +218,19 @@ export default function ChatArea({ conv, onMessage, onToggleSidebar }) {
     const asstId    = Date.now() + 1
     const asstMsg   = { id: asstId,         role: 'assistant', text: '',    refs: [], done: false }
 
-    const nextMsgs = [...localMsgs, userMsg, asstMsg]
-    setLocalMsgs(nextMsgs)
+    // This call's own message list, tracked independently of the `localMsgs`
+    // component state — if the user switches to a different conversation
+    // mid-stream, `localMsgs` gets swapped to that conversation's messages,
+    // but this send() call must keep accumulating (and eventually persist)
+    // *this* session's own content rather than whatever is now on screen.
+    let msgs = [...localMsgs, userMsg, asstMsg]
+    const isActive = () => activeIdRef.current === sessionId
+
+    setLocalMsgs(msgs)
     setStreaming(true)
 
     // Notify parent: creates/updates conversation entry
-    onMessage(sessionId, [...localMsgs, userMsg], query)
+    onMessage(sessionId, msgs.filter(m => m.id !== asstId), query)
 
     const ctrl = new AbortController()
     abortRef.current = ctrl
@@ -232,12 +267,9 @@ export default function ChatArea({ conv, onMessage, onToggleSidebar }) {
           if (payload.startsWith('[REFS]')) {
             try {
               const refs = JSON.parse(payload.slice(6))
-              let refsUpdated = []
-              setLocalMsgs(prev => {
-                refsUpdated = prev.map(m => m.id === asstId ? { ...m, refs, done: true } : m)
-                return refsUpdated
-              })
-              onMessage(sessionId, refsUpdated.filter(m => m.done || m.id !== asstId), query)
+              msgs = msgs.map(m => m.id === asstId ? { ...m, refs, done: true } : m)
+              if (isActive()) setLocalMsgs(msgs)
+              onMessage(sessionId, msgs.filter(m => m.done || m.id !== asstId), query)
             } catch {}
             continue
           }
@@ -245,29 +277,31 @@ export default function ChatArea({ conv, onMessage, onToggleSidebar }) {
             // Backend telemetry (cache_hit/faq_hit/intent/latency) — not shown in the UI.
             continue
           }
+          let tokenText
           try {
-            const token = JSON.parse(payload)
-            setLocalMsgs(prev => prev.map(m => m.id === asstId ? { ...m, text: m.text + token } : m))
+            tokenText = JSON.parse(payload)
           } catch {
-            setLocalMsgs(prev => prev.map(m => m.id === asstId ? { ...m, text: m.text + payload } : m))
+            tokenText = payload
           }
+          msgs = msgs.map(m => m.id === asstId ? { ...m, text: m.text + tokenText } : m)
+          if (isActive()) setLocalMsgs(msgs)
         }
       }
     } catch (e) {
       if (e.name !== 'AbortError') {
-        setLocalMsgs(prev => prev.map(m =>
+        msgs = msgs.map(m =>
           m.id === asstId ? { ...m, text: '抱歉，请求出现错误，请稍后重试。', done: true } : m
-        ))
+        )
+        if (isActive()) setLocalMsgs(msgs)
       }
     } finally {
       sendingSessionRef.current = null
-      let finalMsgs = []
-      setLocalMsgs(prev => {
-        finalMsgs = prev.map(m => m.id === asstId && !m.done ? { ...m, done: true } : m)
-        return finalMsgs
-      })
-      onMessage(sessionId, finalMsgs.filter(m => m.role === 'user' || m.done), null)
-      setStreaming(false)
+      msgs = msgs.map(m => m.id === asstId && !m.done ? { ...m, done: true } : m)
+      if (isActive()) {
+        setLocalMsgs(msgs)
+        setStreaming(false)
+      }
+      onMessage(sessionId, msgs.filter(m => m.role === 'user' || m.done), null)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
   }

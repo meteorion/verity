@@ -11,3 +11,13 @@ html, body, #root {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
+
+/* Brief flash when a citation badge jumps the view to its source card */
+.ref-card:target {
+  animation: ref-card-highlight 1.6s ease-out;
+  border-radius: 6px;
+}
+@keyframes ref-card-highlight {
+  from { background-color: #eef2ff; }
+  to   { background-color: transparent; }
+}

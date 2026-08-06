@@ -5,17 +5,17 @@ export default function Sidebar({ convs, activeId, user, onNew, onSelect, onDele
   const groups = groupConvsByDate(convs)
 
   return (
-    <aside className="flex flex-col h-full bg-slate-950 text-slate-300 w-64 select-none">
+    <aside className="flex flex-col h-full bg-slate-950 text-slate-300 w-72 select-none">
       {/* Top */}
-      <div className="flex items-center gap-2 px-3 pt-6 pb-4">
+      <div className="flex items-center gap-2 px-3 pt-4 pb-3">
         {/* Logo */}
         <div className="flex items-center gap-2.5 flex-1 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shrink-0">
             <BotIcon />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-white leading-none">智能客服</p>
-            <p className="text-[10px] text-emerald-400 mt-1 flex items-center gap-1 leading-none">
+            <p className="text-base font-semibold text-white leading-none">智能客服</p>
+            <p className="text-xs text-emerald-400 mt-1.5 flex items-center gap-1 leading-none">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>
               在线中
             </p>
@@ -30,10 +30,10 @@ export default function Sidebar({ convs, activeId, user, onNew, onSelect, onDele
       </div>
 
       {/* New chat */}
-      <div className="px-3 mt-2 pb-4">
+      <div className="px-3 pb-3">
         <button
           onClick={onNew}
-          className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm text-slate-300 hover:bg-slate-800 hover:text-white border border-slate-700 hover:border-slate-600 transition-colors"
+          className="w-full flex items-center gap-2 px-3 py-3 rounded-xl text-base text-slate-300 hover:bg-slate-800 hover:text-white border border-slate-700 hover:border-slate-600 transition-colors"
         >
           <PlusIcon />
           新对话
@@ -43,12 +43,12 @@ export default function Sidebar({ convs, activeId, user, onNew, onSelect, onDele
       {/* Conversation list */}
       <div className="flex-1 overflow-y-auto px-2 space-y-4 py-1">
         {convs.length === 0 && (
-          <p className="text-xs text-slate-600 text-center py-6">暂无对话记录</p>
+          <p className="text-sm text-slate-600 text-center py-6">暂无对话记录</p>
         )}
         {groups.map(group => (
           <div key={group.label}>
-            <p className="text-[10px] font-medium text-slate-600 uppercase tracking-wider px-2 pb-1">{group.label}</p>
-            <div className="space-y-0.5">
+            <p className="text-xs font-medium text-slate-600 uppercase tracking-wider px-2 pb-1.5">{group.label}</p>
+            <div className="space-y-1">
               {group.items.map(conv => (
                 <ConvItem
                   key={conv.id}
@@ -64,15 +64,15 @@ export default function Sidebar({ convs, activeId, user, onNew, onSelect, onDele
       </div>
 
       {/* User area */}
-      <div className="border-t border-slate-800 p-3">
+      <div className="border-t border-slate-800 px-3 py-2">
         {user ? (
           <div className="flex items-center gap-2.5 group relative">
-            <div className="w-7 h-7 rounded-full bg-indigo-700 text-indigo-200 flex items-center justify-center text-xs font-semibold shrink-0">
+            <div className="w-8 h-8 rounded-full bg-indigo-700 text-indigo-200 flex items-center justify-center text-sm font-semibold shrink-0">
               {user.name?.charAt(0) || '?'}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-slate-200 truncate">{user.name}</p>
-              <p className="text-[10px] text-slate-500 truncate">{user.email}</p>
+              <p className="text-sm font-medium text-slate-200 truncate">{user.name}</p>
+              <p className="text-xs text-slate-500 truncate">{user.email}</p>
             </div>
             <button
               onClick={onLogout}
@@ -85,7 +85,7 @@ export default function Sidebar({ convs, activeId, user, onNew, onSelect, onDele
         ) : (
           <button
             onClick={onLogin}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-base text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           >
             <LoginIcon />
             登录账号
@@ -103,16 +103,16 @@ function ConvItem({ conv, active, onSelect, onDelete }) {
     <div
       onMouseEnter={() => setHovering(true)}
       onMouseLeave={() => setHovering(false)}
-      className={`group flex items-center gap-1 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
+      className={`group flex items-center gap-1 px-2.5 py-2.5 rounded-lg cursor-pointer transition-colors ${
         active ? 'bg-slate-800 text-white' : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
       }`}
       onClick={onSelect}
     >
-      <p className="flex-1 text-xs truncate">{conv.title}</p>
+      <p className="flex-1 text-sm truncate">{conv.title}</p>
       {(hovering || active) && (
         <button
           onClick={e => { e.stopPropagation(); onDelete() }}
-          className="shrink-0 p-0.5 rounded text-slate-600 hover:text-red-400 hover:bg-slate-700 transition-colors"
+          className="shrink-0 p-1 rounded text-slate-600 hover:text-red-400 hover:bg-slate-700 transition-colors"
         >
           <TrashIcon />
         </button>
@@ -124,7 +124,7 @@ function ConvItem({ conv, active, onSelect, onDelete }) {
 // Icons
 function BotIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="11" width="18" height="10" rx="2"/>
       <circle cx="12" cy="5" r="2"/>
       <path d="M12 7v4"/>
@@ -135,14 +135,14 @@ function BotIcon() {
 }
 function PlusIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
       <path d="M12 5v14M5 12h14"/>
     </svg>
   )
 }
 function TrashIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
       <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
     </svg>
   )
