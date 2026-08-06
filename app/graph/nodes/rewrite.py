@@ -70,7 +70,7 @@ def _should_rewrite(query: str, history: list[dict]) -> bool:
 
 
 async def _llm_rewrite(query: str, history: list[dict]) -> str:
-    from inference.llm import get_llm
+    from inference.llm import get_fast_llm
     from langchain_core.messages import HumanMessage, SystemMessage
 
     recent = history[-3:]
@@ -83,7 +83,7 @@ async def _llm_rewrite(query: str, history: list[dict]) -> str:
         "只输出改写后的问题，不要任何解释。如果问题已经完整，原样输出。"
     )
     user = f"对话历史：\n{history_text}\n\n用户最新问题：{query}\n\n改写后的问题："
-    llm = get_llm(max_tokens=120, temperature=0.0)
+    llm = get_fast_llm(max_tokens=120, temperature=0.0)
     resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
     content = resp.content
     if isinstance(content, list):
@@ -170,7 +170,7 @@ def _should_expand(query: str, intent: str | None) -> bool:
 
 
 async def _multi_query_expand(query: str, n: int = 3) -> list[str]:
-    from inference.llm import get_llm
+    from inference.llm import get_fast_llm
     from langchain_core.messages import HumanMessage, SystemMessage
 
     system = (
@@ -178,7 +178,7 @@ async def _multi_query_expand(query: str, n: int = 3) -> list[str]:
         "不要编号、不要解释，不要输出原问题。"
     )
     user = f"问题：{query}"
-    llm = get_llm(max_tokens=200, temperature=0.3)
+    llm = get_fast_llm(max_tokens=200, temperature=0.3)
     resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
     content = resp.content
     if isinstance(content, list):
