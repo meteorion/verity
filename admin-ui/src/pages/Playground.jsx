@@ -40,6 +40,7 @@ export default function Playground() {
   const [debugResult, setDebugResult] = useState(null)
   const [debugError, setDebugError] = useState(null)
   const [liveSpans, setLiveSpans] = useState([])
+  const traceScrollRef = useRef(null)
 
   // ── new session ───────────────────────────────────────────
   function newSession() {
@@ -197,6 +198,13 @@ export default function Playground() {
     }
   }
 
+  // auto-scroll trace as spans arrive
+  useEffect(() => {
+    if (traceScrollRef.current) {
+      traceScrollRef.current.scrollTop = traceScrollRef.current.scrollHeight
+    }
+  }, [liveSpans])
+
   const hasResult = answer || streaming || debugging || streamError || debugError
 
   return (
@@ -275,12 +283,12 @@ export default function Playground() {
           {(streamError || debugError) && (
             <p className="text-sm text-red-500">错误：{streamError || debugError}</p>
           )}
-          {debugResult && (
+          {(debugResult || debugging) && (
             <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap gap-2 text-xs text-slate-500">
-              <span>意图：<span className="font-medium text-slate-700">{debugResult.intent ?? '—'}</span></span>
-              {debugResult.faq_hit && <Badge tone="green">FAQ 命中</Badge>}
-              {debugResult.cache_hit && <Badge tone="blue">语义缓存命中</Badge>}
-              <span>总耗时：<span className="font-medium text-slate-700">{debugResult.total_ms} ms</span></span>
+              <span>意图：<span className="font-medium text-slate-700">{debugResult?.intent ?? '…'}</span></span>
+              {debugResult?.faq_hit && <Badge tone="green">FAQ 命中</Badge>}
+              {debugResult?.cache_hit && <Badge tone="blue">语义缓存命中</Badge>}
+              {debugResult && <span>总耗时：<span className="font-medium text-slate-700">{debugResult.total_ms} ms</span></span>}
             </div>
           )}
         </Card>
@@ -363,31 +371,37 @@ export default function Playground() {
           {!debugResult && !liveSpans.length && !debugging ? (
             <p className="text-xs text-slate-400">点击"调试运行"后显示各节点耗时</p>
           ) : (
-            <div className="space-y-2.5">
-              {(debugResult?.spans ?? liveSpans).map((t, i) => (
-                <div key={i} className="flex items-center justify-between text-xs">
-                  <div>
-                    <p className="text-slate-700 font-medium">{t.span}</p>
-                    <p className="text-slate-400">{t.detail}</p>
-                  </div>
-                  <span className={`font-medium tabular-nums ${t.latency_ms > 500 ? 'text-amber-600' : 'text-slate-500'}`}>
-                    {t.latency_ms} ms
-                  </span>
-                </div>
-              ))}
+            <>
               {debugging && (
-                <div className="flex items-center gap-1.5 text-xs text-slate-400 animate-pulse">
-                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                <div className="flex items-center gap-1.5 text-xs text-indigo-400 mb-2">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
                   运行中…
                 </div>
               )}
+              <div
+                ref={traceScrollRef}
+                className="space-y-2.5 overflow-y-auto"
+                style={{ maxHeight: '16rem' }}
+              >
+                {(debugResult?.spans ?? liveSpans).map((t, i) => (
+                  <div key={i} className="flex items-center justify-between text-xs">
+                    <div>
+                      <p className="text-slate-700 font-medium">{t.span}</p>
+                      <p className="text-slate-400">{t.detail}</p>
+                    </div>
+                    <span className={`font-medium tabular-nums ${t.latency_ms > 500 ? 'text-amber-600' : 'text-slate-500'}`}>
+                      {t.latency_ms} ms
+                    </span>
+                  </div>
+                ))}
+              </div>
               {debugResult && (
                 <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-sm">
                   <span className="text-slate-500">合计</span>
                   <span className="font-semibold text-emerald-600">{(debugResult.total_ms / 1000).toFixed(2)} s</span>
                 </div>
               )}
-            </div>
+            </>
           )}
         </Card>
 
@@ -422,11 +436,15 @@ function Metric({ label, value, tone = 'slate' }) {
   )
 }
 
+function linkifyCitations(text) {
+  return text.replace(/\[(\d+)\]/g, (_, n) => `[${n}](#ref-${n})`)
+}
+
 function AnswerText({ text, streaming }) {
   return (
     <div className="text-sm text-slate-800">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-        {text}
+        {linkifyCitations(text)}
       </ReactMarkdown>
       {streaming && (
         <span className="inline-block w-0.5 h-3.5 bg-indigo-400 ml-0.5 align-text-bottom animate-pulse" />
@@ -445,7 +463,7 @@ function RefList({ refs }) {
       {refs.map((ref) => {
         const label = ref.breadcrumb?.split(' > ')[0].trim() || ref.title || `来源 ${ref.idx}`
         return (
-          <div key={ref.idx} className="flex items-start gap-2 text-xs">
+          <div key={ref.idx} id={`ref-${ref.idx}`} className="ref-card flex items-start gap-2 text-xs px-1 py-0.5 -mx-1">
             <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-indigo-50 text-indigo-500 font-semibold text-[10px] mt-px">
               {ref.idx}
             </span>

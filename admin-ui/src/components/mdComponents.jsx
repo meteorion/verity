@@ -9,7 +9,16 @@ export const MD_COMPONENTS = {
   strong:     ({ children }) => <strong className="font-semibold text-slate-900">{children}</strong>,
   em:         ({ children }) => <em className="italic">{children}</em>,
   blockquote: ({ children }) => <blockquote className="border-l-2 border-slate-300 pl-3 my-2 text-slate-500 italic">{children}</blockquote>,
-  a:          ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline break-all">{children}</a>,
+  a: ({ href, children }) => {
+    if (href?.startsWith('#ref-')) {
+      return (
+        <a href={href} className="inline-flex items-center justify-center w-4 h-4 mx-0.5 rounded-full bg-indigo-50 text-indigo-500 font-semibold text-[10px] align-super no-underline hover:bg-indigo-100">
+          {children}
+        </a>
+      )
+    }
+    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline break-all">{children}</a>
+  },
   hr:         () => <hr className="my-3 border-slate-200" />,
   code:       ({ inline, className, children }) => inline
     ? <code className="px-1 py-0.5 rounded bg-slate-100 text-slate-700 text-xs font-mono">{children}</code>
