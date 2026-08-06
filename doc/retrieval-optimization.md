@@ -196,9 +196,9 @@
 
 ---
 
-### 3.5 语义缓存（Semantic Cache）⚠️ 基础实现已有，向量模糊命中待完善
+### 3.5 语义缓存（Semantic Cache）✅ hash 缓存已接入，向量模糊命中待完善
 
-**实现状态**：`app/retrieval/cache.py` 已使用 hash 精确匹配（P1）；`SEMANTIC_CACHE_THRESHOLD` 配置存在，但基于向量相似度的模糊命中逻辑尚未接入检索主路径（P2 TODO）。
+**实现状态**：`app/retrieval/cache.py` hash 精确匹配已接入 `hybrid_retrieve()`（`cache_get` 开头查询，`cache_set` 返回前写入）；`SEMANTIC_CACHE_THRESHOLD` 配置存在，但基于向量相似度的模糊命中逻辑尚未实现（P2 TODO）。
 
 **完整方案（P2）**：
 ```
@@ -420,7 +420,7 @@ Prompt：
 | 优先级 | 方案 | 状态 | 预期收益 |
 |---|---|---|---|
 | P1 | 2.1 父子分块 | ✅ 已实现 | 高 |
-| P1 | 3.5 语义缓存（hash 精确匹配） | ✅ 已实现 | 高（降本+提速） |
+| P1 | 3.5 语义缓存（hash 精确匹配，已接入检索路径） | ✅ 已实现 | 高（降本+提速） |
 | P1 | 3.6 多问法扩充索引（表结构+检索） | ✅ 已实现 | 高（待填充数据） |
 | P1 | 4.1 加权 RRF | ✅ 已实现 | 中 |
 | P1 | 4.3 dense_score_threshold | ✅ 已实现 | 低（噪声兜底） |
