@@ -201,8 +201,16 @@ async def rewrite_node(state: OrchestratorState) -> dict:
     embed_results = await asyncio.to_thread(emb_mod.embed, [query], mode="dense")
     vec: list[float] = embed_results[0].dense
 
-    # 1. Semantic cache
-    cached = await _check_cache(vec)
+    # 1. Semantic cache — skip entirely when use_cache=false in settings
+    _use_cache = True
+    try:
+        from api.settings import load_settings
+        v = load_settings().get("use_cache")
+        if v is not None:
+            _use_cache = str(v).lower() not in ("false", "0", "no")
+    except Exception:
+        pass
+    cached = (await _check_cache(vec)) if _use_cache else None
     if cached:
         # Restore refs so chat.py can emit [REFS] for citation markers in the answer.
         # Old cache entries have "chunk_ids" (list[str]); new entries have "refs" (list[dict]).
