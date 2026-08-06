@@ -93,7 +93,14 @@ async def index_chunks(chunks: list[Chunk]) -> dict:
                 pass
 
         admission_score = _calc_score(chunks, dedup_similarities)
-        status = "active" if admission_score >= 60 else "pending"
+
+        # policy / announcement are authoritative by nature; skip the score gate.
+        doc_type = (chunks[0].doc_type or "").lower()
+        if doc_type in {"policy", "announcement"}:
+            status = "active"
+            logger.debug("doc_type=%s auto-active; admission_score=%d recorded but not gating", doc_type, admission_score)
+        else:
+            status = "active" if admission_score >= 60 else "pending"
 
         async with conn.transaction():
             for chunk in chunks:
