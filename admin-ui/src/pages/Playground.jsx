@@ -205,7 +205,7 @@ export default function Playground() {
     }
   }, [liveSpans])
 
-  const hasResult = answer || streaming || debugging || streamError || debugError
+  const hasResult = answer || streaming || debugging || streamError || debugError || !!debugResult
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">

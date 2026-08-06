@@ -68,6 +68,7 @@ async def debug_chat(req: DebugRequest, request: Request):
         accumulated: dict = {}
         t0 = time.perf_counter()
         t_prev = t0
+        tokens_emitted = False  # True once any answer token is sent via messages mode
 
         async for mode, chunk in graph.astream(
             {
@@ -112,8 +113,14 @@ async def debug_chat(req: DebugRequest, request: Request):
                         )
                     if content:
                         yield f"data: {json.dumps(content, ensure_ascii=False)}\n\n"
+                        tokens_emitted = True
 
         # ── final frame ──────────────────────────────────────────────────
+        # Cache hit / FAQ hit / transfer: graph short-circuits before generate,
+        # so messages mode never fires.  Emit the answer now as a single chunk.
+        answer = accumulated.get("answer_stream") or ""
+        if answer and not tokens_emitted:
+            yield f"data: {json.dumps(answer, ensure_ascii=False)}\n\n"
         raw_chunks = accumulated.get("retrieved_chunks") or []
         chunks_safe = [
             {k: (float(v) if k == "score" else v)
@@ -121,7 +128,6 @@ async def debug_chat(req: DebugRequest, request: Request):
             for c in raw_chunks
         ]
         refs = build_refs(raw_chunks)
-        answer = accumulated.get("answer_stream") or ""
         total_ms = round((time.perf_counter() - t0) * 1000)
 
         debug_payload = {
