@@ -78,7 +78,7 @@ async def index_chunks(chunks: list[Chunk]) -> dict:
         doc_id = chunks[0].doc_id
 
         # Multi-sample dedup: compare up to 5 retrieval chunks against existing corpus.
-        sample_embs = [c.embedding for c in retrieval_chunks if c.embedding][:5]
+        sample_embs = [c.embedding for c in retrieval_chunks if c.embedding][:10]
         dedup_similarities: list[float] = []
         for emb in sample_embs:
             try:
@@ -142,6 +142,16 @@ async def index_chunks(chunks: list[Chunk]) -> dict:
                     chunk.chunk_index, chunk.is_parent,
                     chunk.updated_at, embedding, sparse,
                 )
+
+            # Remove chunks from previous ingestion that are no longer present.
+            # question_embeddings rows are cleaned up automatically via ON DELETE CASCADE.
+            new_chunk_ids = [chunk.chunk_id for chunk in chunks]
+            deleted = await conn.execute(
+                "DELETE FROM chunks WHERE doc_id = $1 AND chunk_id != ALL($2::text[])",
+                doc_id, new_chunk_ids,
+            )
+            if deleted != "DELETE 0":
+                logger.info("Cleaned up stale chunks for doc_id=%s: %s", doc_id, deleted)
 
             await conn.execute(
                 "UPDATE documents SET admission_score=$1, status=$2, updated_at=now() WHERE doc_id=$3",

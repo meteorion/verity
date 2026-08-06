@@ -9,7 +9,9 @@ class Document:
     doc_id: str
     title: str
     owner_email: str
-    group_ids: list[str] = field(default_factory=lambda: ["global"])
+    product_line: list[str] = field(default_factory=lambda: ["global"])
+    # business_line: free-text informational label (e.g. "payments"); NOT used for retrieval filtering.
+    # Use product_line for access-control grouping (shouyintong / saas / lianhe_shoudan / global).
     business_line: str = ""
     source_type: str = "upload"
     source_path: str | None = None
@@ -18,9 +20,12 @@ class Document:
     effective_from: datetime | None = None
     effective_to: datetime | None = None
     acl: list[str] = field(default_factory=lambda: ["role:public"])
+    region: list[str] = field(default_factory=lambda: ["global"])
     doc_type: str | None = None  # FAQ / 操作手册 / 政策说明 / 合同模板
-    category: str | None = None  # 退款 / 发货 / 会员 …（传播到所有子 chunk）
-    tags: list[str] = field(default_factory=list)
+    # default_category / default_tags: propagated to all child chunks at ingest time.
+    # Not a document-level classification — a large doc may span multiple categories.
+    default_category: str | None = None
+    default_tags: list[str] = field(default_factory=list)
     chunk_size: int | None = None    # per-doc override; None = use global setting
     chunk_overlap: int | None = None
     status: str = "pending"

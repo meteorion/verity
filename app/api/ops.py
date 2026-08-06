@@ -47,7 +47,7 @@ async def list_documents(status: str = "active", limit: int = 50):
             "       d.admission_score, d.updated_at, d.version, d.source_type,"
             "       d.source_url, d.effective_from, d.effective_to,"
             "       COALESCE(d.acl, '{role:public}') AS acl,"
-            "       COALESCE(d.group_ids, '{global}') AS group_ids,"
+            "       COALESCE(d.product_line, '{global}') AS product_line,"
             "       d.doc_type, d.chunk_size, d.chunk_overlap,"
             "       COUNT(c.chunk_id) FILTER (WHERE c.is_parent = FALSE) AS chunk_count"
             " FROM documents d"
@@ -98,13 +98,13 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
             " version, effective_from, effective_to, doc_type,"
             " chunk_size, chunk_overlap,"
             " COALESCE(acl, '{role:public}') AS acl,"
-            " COALESCE(group_ids, '{global}') AS group_ids"
+            " COALESCE(product_line, '{global}') AS product_line"
             " FROM documents WHERE doc_id=$1",
             doc_id,
         )
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        groups = list(doc["group_ids"]) or ["global"]
+        groups = list(doc["product_line"]) or ["global"]
         owner = doc["owner_email"] or ""
         business_line = doc["business_line"] or "default"
         stored_source_path: str | None = doc["source_path"]
@@ -162,7 +162,7 @@ async def rebuild_document(doc_id: str, file: UploadFile | None = File(None)):
         title=doc["title"] or doc_id,
         owner_email=owner,
         business_line=business_line,
-        group_ids=groups,
+        product_line=groups,
         source_path=str(source_file),
         version=doc_version,
         effective_from=doc_eff_from,
@@ -317,7 +317,7 @@ async def set_doc_acl(doc_id: str, body: AclUpdate):
 # ---------------------------------------------------------------------------
 
 class GroupAssign(BaseModel):
-    group_ids: List[str]
+    product_line: List[str]
 
 
 @router.get("/documents/{doc_id}/groups")
@@ -328,7 +328,7 @@ async def get_doc_groups(doc_id: str):
             "SELECT pg.group_id, pg.name, pg.description"
             " FROM project_groups pg"
             " WHERE pg.group_id = ANY("
-            "   SELECT UNNEST(group_ids) FROM documents WHERE doc_id=$1"
+            "   SELECT UNNEST(product_line) FROM documents WHERE doc_id=$1"
             ")",
             doc_id,
         )
@@ -340,19 +340,19 @@ async def get_doc_groups(doc_id: str):
 @router.put("/documents/{doc_id}/groups")
 async def set_doc_groups(doc_id: str, body: GroupAssign):
     """Replace the project groups of a document and sync chunks.product_line."""
-    groups = body.group_ids or ["global"]
+    groups = body.product_line or ["global"]
     conn = await _get_conn()
     try:
         async with conn.transaction():
             await conn.execute(
-                "UPDATE documents SET group_ids=$2, updated_at=now() WHERE doc_id=$1",
+                "UPDATE documents SET product_line=$2, updated_at=now() WHERE doc_id=$1",
                 doc_id, groups,
             )
             await conn.execute(
                 "UPDATE chunks SET product_line=$2 WHERE doc_id=$1",
                 doc_id, groups,
             )
-        return {"doc_id": doc_id, "group_ids": groups}
+        return {"doc_id": doc_id, "product_line": groups}
     finally:
         await _release_conn(conn)
 
@@ -986,10 +986,10 @@ async def create_chunk(doc_id: str, body: ChunkUpsert):
     conn = await _get_conn()
     try:
         doc_row = await conn.fetchrow(
-            "SELECT COALESCE(group_ids, '{global}') AS group_ids FROM documents WHERE doc_id=$1",
+            "SELECT COALESCE(product_line, '{global}') AS product_line FROM documents WHERE doc_id=$1",
             doc_id,
         )
-        product_line = list(doc_row["group_ids"]) if doc_row else ["global"]
+        product_line = list(doc_row["product_line"]) if doc_row else ["global"]
 
         if embedding is not None:
             await register_vector(conn)
@@ -1137,10 +1137,10 @@ async def import_chunks_jsonl(
         await register_vector(conn)
 
         doc_row = await conn.fetchrow(
-            "SELECT COALESCE(group_ids, '{global}') AS group_ids FROM documents WHERE doc_id=$1",
+            "SELECT COALESCE(product_line, '{global}') AS product_line FROM documents WHERE doc_id=$1",
             target_doc_id,
         )
-        product_line = list(doc_row["group_ids"]) if doc_row else ["global"]
+        product_line = list(doc_row["product_line"]) if doc_row else ["global"]
 
         ts = int(_time.time() * 1000)
         contents = [item["content"].strip() for item in items]

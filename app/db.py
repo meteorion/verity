@@ -17,7 +17,7 @@ _SCHEMA_SQL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Documents: source of truth for all knowledge-base documents.
--- group_ids replaces the old document_groups junction table.
+-- product_line: project group assignment; synced to chunks.product_line at ingest/update time.
 CREATE TABLE IF NOT EXISTS documents (
     doc_id          TEXT PRIMARY KEY,
     title           TEXT NOT NULL,
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS documents (
     effective_from  TIMESTAMPTZ,
     effective_to    TIMESTAMPTZ,
     acl             TEXT[] DEFAULT '{{role:public}}',
-    group_ids       TEXT[] DEFAULT '{{global}}',
+    product_line    TEXT[] DEFAULT '{{global}}',
     doc_type        TEXT,
     updated_at      TIMESTAMPTZ DEFAULT now()
 );
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS project_groups (
 );
 
 -- Built-in default group: documents/chunks fall back to this when no group is
--- assigned (see documents.group_ids / chunks.product_line defaults above), and
+-- assigned (see documents.product_line / chunks.product_line defaults above), and
 -- delete_group() refuses to delete it — so it must always exist.
 INSERT INTO project_groups(group_id, name, description) VALUES
     ('global', '全局', '系统内置默认项目组，覆盖未指定项目组的文档'),
@@ -220,25 +220,34 @@ EXCEPTION WHEN undefined_column THEN NULL;
 END $$;
 
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT '';
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS group_ids TEXT[] DEFAULT '{{global}}';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_type TEXT;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS acl TEXT[] DEFAULT '{{role:public}}';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS chunk_size INT;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS chunk_overlap INT;
 
--- Migrate existing document_groups data into documents.group_ids for installs
--- that still have the old junction table.
+-- Rename group_ids → product_line (consistent with chunks.product_line).
+-- Fresh installs: CREATE TABLE already uses product_line, both branches are no-ops.
+-- Old installs: the RENAME runs once; subsequent runs hit the EXCEPTION and skip.
+DO $$
+BEGIN
+    ALTER TABLE documents RENAME COLUMN group_ids TO product_line;
+EXCEPTION WHEN undefined_column THEN NULL;
+           WHEN duplicate_object THEN NULL;
+END $$;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS product_line TEXT[] DEFAULT '{{global}}';
+
+-- Migrate existing document_groups junction table into documents.product_line.
 DO $$
 BEGIN
     UPDATE documents d
-    SET group_ids = sub.gids
+    SET product_line = sub.gids
     FROM (
         SELECT doc_id, ARRAY_AGG(group_id) AS gids
         FROM document_groups
         GROUP BY doc_id
     ) sub
     WHERE sub.doc_id = d.doc_id
-      AND (d.group_ids IS NULL OR d.group_ids = '{{global}}');
+      AND (d.product_line IS NULL OR d.product_line = '{{global}}');
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
@@ -281,6 +290,31 @@ CREATE TABLE IF NOT EXISTS background_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON background_jobs (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_ref ON background_jobs (ref_id);
+
+-- Integrity constraints (idempotent via exception handlers).
+DO $$
+BEGIN
+    ALTER TABLE documents
+        ADD CONSTRAINT documents_status_check
+        CHECK (status IN ('pending', 'active', 'rejected'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    ALTER TABLE chunks
+        ADD CONSTRAINT chunks_doc_id_fk
+        FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    ALTER TABLE chunks
+        ADD CONSTRAINT chunks_parent_chunk_id_fk
+        FOREIGN KEY (parent_chunk_id) REFERENCES chunks(chunk_id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 """
 
 

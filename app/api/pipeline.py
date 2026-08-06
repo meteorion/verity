@@ -54,7 +54,7 @@ async def _run_ingest(job_id: str, raw_path: Path, doc: Document) -> None:
                 "chunk_count": result["chunk_count"],
                 "admission_score": result["admission_score"],
                 "status": result.get("status", "pending"),
-                "group_ids": doc.group_ids,
+                "product_line": doc.product_line,
             },
         )
         logger.info("Ingest job %s completed: doc=%s chunks=%d", job_id, doc.doc_id, result["chunk_count"])
@@ -69,15 +69,16 @@ async def ingest(
     file: UploadFile,
     doc_id: str = Form(...),
     owner: str = Form(...),
-    group_ids: str = Form(""),
+    product_line: str = Form(""),
     acl_roles: str = Form("role:public"),
     source_url: str = Form(""),
     version: str = Form("1.0"),
     effective_from: str = Form(""),
     effective_to: str = Form(""),
     doc_type: str = Form(""),
-    category: str = Form(""),
-    tags: str = Form(""),
+    default_category: str = Form(""),
+    default_tags: str = Form(""),
+    region: str = Form(""),
     chunk_size: int = Form(0),
     chunk_overlap: int = Form(0),
 ):
@@ -86,24 +87,26 @@ async def ingest(
     with raw_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    groups = [g.strip() for g in group_ids.split(",") if g.strip()] or ["global"]
+    groups = [g.strip() for g in product_line.split(",") if g.strip()] or ["global"]
     acl = [r.strip() for r in acl_roles.split(",") if r.strip()] or ["role:public"]
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    tag_list = [t.strip() for t in default_tags.split(",") if t.strip()]
+    region_list = [r.strip() for r in region.split(",") if r.strip()] or ["global"]
 
     doc = Document(
         doc_id=doc_id,
         title=file.filename.rsplit(".", 1)[0],  # updated inside _run_ingest after parse
         owner_email=owner,
-        group_ids=groups,
+        product_line=groups,
         source_path=str(raw_path),
         source_url=source_url or None,
         version=version.strip() or "1.0",
         effective_from=_parse_dt(effective_from),
         effective_to=_parse_dt(effective_to),
         acl=acl,
+        region=region_list,
         doc_type=doc_type.strip() or None,
-        category=category.strip() or None,
-        tags=tag_list,
+        default_category=default_category.strip() or None,
+        default_tags=tag_list,
         chunk_size=chunk_size if chunk_size > 0 else None,
         chunk_overlap=chunk_overlap if chunk_overlap > 0 else None,
     )

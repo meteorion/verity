@@ -114,9 +114,10 @@ async def chunk_document(
     markdown: str = parsed.get("markdown", "")
     doc_title: str = parsed.get("metadata", {}).get("title", doc.doc_id)
     updated_at = datetime.now(timezone.utc)
-    product_line = list(doc.group_ids) if doc.group_ids else ["global"]
+    product_line = list(doc.product_line) if doc.product_line else ["global"]
     chunk_acl = list(doc.acl) if doc.acl else ["role:public"]
-    chunk_tags = list(doc.tags) if doc.tags else []
+    chunk_tags = list(doc.default_tags) if doc.default_tags else []
+    chunk_region = list(doc.region) if doc.region else ["global"]
 
     sections = _parse_sections(markdown)
     # doc_chunk_* = explicit per-doc override (stored in DB, None means "use global").
@@ -151,20 +152,21 @@ async def chunk_document(
             breadcrumb=breadcrumb,
             source_url=doc.source_url,
             product_line=product_line,
-            region=["global"],
+            region=chunk_region,
             version=doc.version,
             effective_from=doc.effective_from,
             effective_to=doc.effective_to,
             acl=chunk_acl,
             doc_type=doc.doc_type,
-            category=doc.category,
+            category=doc.default_category,
             tags=chunk_tags,
             updated_at=updated_at,
         )
 
         if _token_est(body) <= effective_chunk_size:
             # Small section — single retrieval chunk, no parent row needed.
-            # Prefix with breadcrumb for embedding consistency with sub-chunks.
+            # content = "{breadcrumb}:\n{body}": breadcrumb prefix is intentional so the
+            # embedding carries navigation context; strip it only when displaying raw text.
             all_chunks.append(Chunk(
                 chunk_id=f"{doc.doc_id}#{section_idx:03d}_000",
                 parent_chunk_id=None,
@@ -180,7 +182,7 @@ async def chunk_document(
                 chunk_id=parent_chunk_id,
                 parent_chunk_id=None,
                 content=body,
-                chunk_index=-1,
+                chunk_index=-1,  # sentinel: parent rows are never ranked, only fetched by ID
                 is_parent=True,
                 **common,
             ))
@@ -212,7 +214,7 @@ async def chunk_document(
                 doc_id, title, owner_email, business_line,
                 source_type, source_path, source_url,
                 version, effective_from, effective_to,
-                acl, group_ids, doc_type, chunk_size, chunk_overlap,
+                acl, product_line, doc_type, chunk_size, chunk_overlap,
                 status, updated_at
             )
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',now())
@@ -220,7 +222,7 @@ async def chunk_document(
                 updated_at     = now(),
                 status         = 'pending',
                 acl            = EXCLUDED.acl,
-                group_ids      = COALESCE(EXCLUDED.group_ids, documents.group_ids),
+                product_line   = COALESCE(EXCLUDED.product_line, documents.product_line),
                 source_path    = COALESCE(EXCLUDED.source_path, documents.source_path),
                 source_url     = COALESCE(EXCLUDED.source_url, documents.source_url),
                 version        = COALESCE(EXCLUDED.version, documents.version),
