@@ -15,6 +15,7 @@ from pgvector.asyncpg import register_vector
 from db import get_pool as _get_pool
 from inference import embedding as emb_mod
 from inference import rerank as rerank_mod
+from retrieval.cache import cache_get, cache_set
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def _retrieval_cfg() -> dict[str, Any]:
             "top_vector":           int(s.get("retrieval_top_vector") or _TOP_VECTOR),
             "dense_score_threshold": float(s.get("dense_score_threshold") or 0.0),
             "rrf_alpha":            float(s.get("rrf_alpha") or 0.6),
-            "ef_search":            int(s.get("ef_search") or 40),
+            "ef_search":            int(s.get("hnsw_ef_search") or 100),
             "rerank_threshold":     float(s.get("rerank_threshold") or 0.0),
         }
     except Exception:
@@ -41,7 +42,7 @@ def _retrieval_cfg() -> dict[str, Any]:
             "top_vector":           _TOP_VECTOR,
             "dense_score_threshold": 0.0,
             "rrf_alpha":            0.6,
-            "ef_search":            40,
+            "ef_search":            100,
             "rerank_threshold":     0.0,
         }
 
@@ -89,6 +90,10 @@ async def hybrid_retrieve(
             dense_vec = embed_results[0].dense
         sparse_vec = embed_results[0].sparse
 
+    cached = await cache_get(dense_vec)
+    if cached is not None:
+        return cached
+
     pool = await _get_pool()
 
     dense_rows = await _dense_search(
@@ -98,6 +103,9 @@ async def hybrid_retrieve(
     )
 
     dense_ids = [r["chunk_id"] for r in dense_rows]
+    # cosine_chunk_ids: chunks whose "score" is cosine similarity (dense + question).
+    # Sparse inner-product scores are not cosine-comparable, so they must skip the threshold filter.
+    cosine_chunk_ids: set[str] = set(dense_ids)
     row_map: dict[str, dict] = {r["chunk_id"]: dict(r) for r in dense_rows}
     base_rankings = [dense_ids]
     base_weights  = [1.0]
@@ -107,7 +115,11 @@ async def hybrid_retrieve(
             pool, sparse_vec, roles, region, cfg["top_vector"], project_group,
         )
         sparse_ids = [r["chunk_id"] for r in sparse_rows]
-        row_map.update({r["chunk_id"]: dict(r) for r in sparse_rows})
+        # Only add sparse entries that aren't already in row_map — preserve the cosine score
+        # for chunks found by both paths (sparse inner-product score is not cosine-comparable).
+        for r in sparse_rows:
+            if r["chunk_id"] not in row_map:
+                row_map[r["chunk_id"]] = dict(r)
         alpha = cfg["rrf_alpha"]
         base_rankings = [dense_ids, sparse_ids]
         base_weights  = [alpha, 1.0 - alpha]
@@ -121,11 +133,18 @@ async def hybrid_retrieve(
     candidates = [row_map[cid] for cid in merged_ids if cid in row_map]
 
     # Question-augmentation: chunks whose LLM-generated questions match the query
-    question_rows = await _question_search(pool, dense_vec, roles, region, cfg["top_vector"], project_group, min_score=cfg["dense_score_threshold"])
-    question_ids = list(dict.fromkeys(r["chunk_id"] for r in question_rows))  # dedup, best first
+    question_rows = await _question_search(
+        pool, dense_vec, roles, region, cfg["top_vector"], project_group,
+        min_score=cfg["dense_score_threshold"],
+        ef_search=cfg["ef_search"],
+    )
+    question_ids = list(dict.fromkeys(r["chunk_id"] for r in question_rows))
 
     if question_ids:
-        row_map.update({r["chunk_id"]: dict(r) for r in question_rows})
+        for r in question_rows:
+            if r["chunk_id"] not in row_map:
+                row_map[r["chunk_id"]] = dict(r)
+            cosine_chunk_ids.add(r["chunk_id"])  # question scores are cosine — threshold applies
         # Scale base weights to 0.7, question contribution = 0.3
         scale = 0.7 / sum(base_weights)
         final_ids, rrf_scores = _rrf_merge(
@@ -135,14 +154,17 @@ async def hybrid_retrieve(
         candidates = [row_map[cid] for cid in final_ids if cid in row_map]
         logger.debug("Question-augmented merge: q_chunks=%d final=%d", len(question_ids), len(candidates))
 
-    # Apply dense_score_threshold on the raw cosine similarity BEFORE normalization.
-    # chunk["score"] at this point is the original cosine similarity from _dense_search /
-    # _question_search (1 - vector_distance). After normalization below, top chunk = 1.0
-    # regardless of actual relevance, so the filter must happen here.
+    # Apply dense_score_threshold on raw cosine similarity BEFORE RRF normalization.
+    # Only applies to cosine-comparable scores (dense + question search).
+    # Sparse-only chunks bypass the filter — their inner-product score is not cosine-comparable.
     min_cos = cfg["dense_score_threshold"]
     if min_cos > 0.0:
         before = len(candidates)
-        candidates = [c for c in candidates if c.get("score", 0.0) >= min_cos]
+        candidates = [
+            c for c in candidates
+            if c["chunk_id"] not in cosine_chunk_ids
+            or c.get("score", 0.0) >= min_cos
+        ]
         if not candidates:
             logger.info(
                 "All candidates below dense_score_threshold=%.2f, returning empty", min_cos
@@ -167,6 +189,7 @@ async def hybrid_retrieve(
             chunk["score"] = round(rrf_scores.get(cid, 0.0) / max_rrf, 4)
 
     logger.info("Retrieval complete: top_k=%d returned=%d", top_k, len(results))
+    await cache_set(dense_vec, results)
     return results
 
 
@@ -178,6 +201,7 @@ async def _question_search(
     limit: int,
     project_group: str | None = None,
     min_score: float = 0.0,
+    ef_search: int = 100,
 ) -> list[asyncpg.Record]:
     """Search question_embeddings; returns chunk rows ranked by best question match."""
     if roles:
@@ -201,27 +225,32 @@ async def _question_search(
         if min_score > 0.0 else ""
     )
 
-    # Get top-limit question matches, then JOIN to chunks for content + ACL filter.
-    # DISTINCT ON ensures one row per chunk (best-matching question wins).
+    # DISTINCT ON picks the best-matching question per chunk; outer ORDER BY ensures
+    # the result list is sorted by score (highest first) so RRF assigns ranks correctly.
     sql = f"""
-        SELECT DISTINCT ON (c.chunk_id)
-            c.chunk_id, c.doc_id, c.content, c.breadcrumb, c.source_url, c.title,
-            1 - (q.embedding <=> $1::vector) AS score
-        FROM question_embeddings q
-        JOIN chunks c ON c.chunk_id = q.chunk_id
-        WHERE {acl_clause}
-          AND (${region_idx} = ANY(c.region) OR 'global' = ANY(c.region))
-          AND (c.effective_from IS NULL OR c.effective_from <= now())
-          AND (c.effective_to   IS NULL OR c.effective_to   >  now())
-          AND c.is_parent = FALSE
-          {score_clause}
-          {pg_clause}
-        ORDER BY c.chunk_id, q.embedding <=> $1::vector
+        SELECT * FROM (
+            SELECT DISTINCT ON (c.chunk_id)
+                c.chunk_id, c.doc_id, c.content, c.breadcrumb, c.source_url, c.title,
+                1 - (q.embedding <=> $1::vector) AS score
+            FROM question_embeddings q
+            JOIN chunks c ON c.chunk_id = q.chunk_id
+            WHERE {acl_clause}
+              AND (${region_idx} = ANY(c.region) OR 'global' = ANY(c.region))
+              AND (c.effective_from IS NULL OR c.effective_from <= now())
+              AND (c.effective_to   IS NULL OR c.effective_to   >  now())
+              AND c.is_parent = FALSE
+              {score_clause}
+              {pg_clause}
+            ORDER BY c.chunk_id, q.embedding <=> $1::vector
+        ) _q
+        ORDER BY score DESC
         LIMIT ${limit_idx}
     """
     async with pool.acquire() as conn:
         await register_vector(conn)
-        return await conn.fetch(sql, *args)
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL hnsw.ef_search = {ef_search}")
+            return await conn.fetch(sql, *args)
 
 
 async def _dense_search(
