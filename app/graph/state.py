@@ -18,6 +18,7 @@ class OrchestratorState(TypedDict):
     history_recent:   list[dict]
     prompt_version:   str
     answer_stream:    str | None
+    answer_streamed:  bool  # True once generate_node has already pushed its tokens live via stream_bus
     nli_flags:        list[dict]
     turn_count:       int
     transferred:      bool

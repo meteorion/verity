@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from pydantic import BaseModel
 from api import auth
 from api.sessions import record_turn
 from citations import build_refs
+from graph import stream_bus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,51 +73,82 @@ async def chat(req: ChatRequest, request: Request):
         t0 = time.perf_counter()
         first_token_ms: int | None = None
 
+        # generate_node streams its LLM tokens live through this queue (outside
+        # checkpointed state — see graph/stream_bus.py). Terminal nodes that
+        # resolve instantly (safety reject / FAQ / semantic cache / transfer /
+        # LLM-call failure) don't push here themselves; the relay below forwards
+        # their one-shot `answer_stream` value through the same queue so this
+        # loop only ever needs one consumption path.
+        queue = stream_bus.open_stream(req.session_id)
+
+        async def run_graph():
+            nonlocal last_chunks, last_state
+            try:
+                async for chunk in graph.astream(
+                    {
+                        "session_id": req.session_id,
+                        "uid": uid,
+                        "roles": [r for r in roles if r],
+                        "region": region,
+                        "project_group": project_group,
+                        "query_raw": req.message,
+                        "top_k": top_k,
+                        "llm_temperature": temperature,
+                        # Reset per-turn fields so the previous turn's values don't
+                        # leak via the checkpointed state / stream_mode="values" snapshots.
+                        # intent/faq_hit in particular are routing keys: a stale
+                        # intent="reject" or faq_hit=True would short-circuit every
+                        # later turn in the session straight to END.
+                        "answer_stream": None,
+                        "answer_streamed": False,
+                        "retrieved_chunks": [],
+                        "intent": None,
+                        "faq_hit": False,
+                        "cache_hit": False,
+                        "query_embedding": None,
+                        "multi_queries": None,
+                        "faq_context": None,
+                        "transferred": False,
+                        "transfer_reason": None,
+                    },
+                    config={"configurable": {"thread_id": req.session_id}},
+                    stream_mode="values",
+                ):
+                    if retrieved := chunk.get("retrieved_chunks"):
+                        last_chunks = retrieved
+                    # Use `is not None` so an empty string still gets relayed.
+                    # answer_streamed=True means generate_node already pushed
+                    # these tokens live — relaying the assembled string again
+                    # here would duplicate it on the client.
+                    if (token := chunk.get("answer_stream")) is not None and not chunk.get("answer_streamed"):
+                        stream_bus.push(req.session_id, token)
+                    last_state = chunk
+            except Exception:
+                logger.exception("Graph execution error [session=%s]", req.session_id)
+                fallback = "抱歉，处理请求时出现错误，请稍后重试或联系人工客服。"
+                stream_bus.push(req.session_id, fallback)
+            finally:
+                stream_bus.close(req.session_id)
+
+        graph_task = asyncio.create_task(run_graph())
+
         try:
-            async for chunk in graph.astream(
-                {
-                    "session_id": req.session_id,
-                    "uid": uid,
-                    "roles": [r for r in roles if r],
-                    "region": region,
-                    "project_group": project_group,
-                    "query_raw": req.message,
-                    "top_k": top_k,
-                    "llm_temperature": temperature,
-                    # Reset per-turn fields so the previous turn's values don't
-                    # leak via the checkpointed state / stream_mode="values" snapshots.
-                    # intent/faq_hit in particular are routing keys: a stale
-                    # intent="reject" or faq_hit=True would short-circuit every
-                    # later turn in the session straight to END.
-                    "answer_stream": None,
-                    "retrieved_chunks": [],
-                    "intent": None,
-                    "faq_hit": False,
-                    "cache_hit": False,
-                    "query_embedding": None,
-                    "multi_queries": None,
-                    "faq_context": None,
-                    "transferred": False,
-                    "transfer_reason": None,
-                },
-                config={"configurable": {"thread_id": req.session_id}},
-                stream_mode="values",
-            ):
-                if retrieved := chunk.get("retrieved_chunks"):
-                    last_chunks = retrieved
-                # Use `is not None` so an empty string still gets yielded
-                if (token := chunk.get("answer_stream")) is not None:
-                    if first_token_ms is None:
-                        first_token_ms = round((time.perf_counter() - t0) * 1000)
-                    answer_tokens.append(token)
-                    # JSON-encode so embedded \n\n in the answer doesn't break SSE framing
-                    yield f"data: {json.dumps(token, ensure_ascii=False)}\n\n"
-                last_state = chunk
-        except Exception:
-            logger.exception("Graph execution error [session=%s]", req.session_id)
-            fallback = "抱歉，处理请求时出现错误，请稍后重试或联系人工客服。"
-            answer_tokens.append(fallback)
-            yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
+            while True:
+                item = await queue.get()
+                if item is stream_bus.DONE:
+                    break
+                if first_token_ms is None:
+                    first_token_ms = round((time.perf_counter() - t0) * 1000)
+                answer_tokens.append(item)
+                # JSON-encode so embedded \n\n in the answer doesn't break SSE framing
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            # If the client disconnected mid-stream, this generator is closed
+            # from the outside (GeneratorExit) right here — without this, the
+            # background graph/LLM call would keep running unattended.
+            if not graph_task.done():
+                graph_task.cancel()
+            await asyncio.gather(graph_task, return_exceptions=True)
 
         total_ms = round((time.perf_counter() - t0) * 1000)
         yield "data: [DONE]\n\n"

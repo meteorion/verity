@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from citations import assign_source_indices
+from graph import stream_bus
 from graph.state import OrchestratorState
 from inference.nli import nli_check
 
@@ -112,16 +113,20 @@ async def generate_node(state: OrchestratorState) -> dict:
         "Calling LLM [session=%s provider=%s model=%s chunks=%d tool_results=%d temperature=%s]",
         state.get("session_id"), _LLM_PROVIDER, _MODEL, len(chunks), len(tool_results), temperature,
     )
+    session_id = state.get("session_id", "")
     try:
-        answer = await _call_llm(messages, temperature, system_prompt)
+        answer = await _call_llm(messages, temperature, system_prompt, session_id)
     except Exception:
         logger.exception("LLM call failed [session=%s]", state.get("session_id"))
         return {
             "answer_stream": "抱歉，服务暂时出现问题，请稍后重试或联系人工客服。",
             "nli_flags": [],
+            "answer_streamed": False,
         }
+    streamed_live = bool(answer)
     if not answer:
         answer = "抱歉，未能获取到回复，请稍后重试。"
+        stream_bus.push(session_id, answer)  # nothing was streamed live — relay it now
     logger.debug(
         "LLM response [session=%s len=%d]",
         state.get("session_id"), len(answer),
@@ -141,7 +146,7 @@ async def generate_node(state: OrchestratorState) -> dict:
         cache_refs = [{k: c.get(k, "") for k in _ref_keys} for c in chunks]
         asyncio.create_task(write_cache(query_for_cache, vec, answer, cache_refs))
 
-    return {"answer_stream": answer, "nli_flags": []}
+    return {"answer_stream": answer, "nli_flags": [], "answer_streamed": streamed_live}
 
 
 def _build_knowledge(chunks: list[dict], tool_results: list[dict], faq_context: str | None = None) -> str:
@@ -176,7 +181,7 @@ def _build_messages(
     return msgs
 
 
-async def _call_llm(messages: list[dict], temperature: float, system_prompt: str) -> str:
+async def _call_llm(messages: list[dict], temperature: float, system_prompt: str, session_id: str) -> str:
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     from inference.llm import get_llm
 
@@ -187,9 +192,13 @@ async def _call_llm(messages: list[dict], temperature: float, system_prompt: str
         else:
             lc_messages.append(AIMessage(content=msg["content"]))
 
-    llm = get_llm(temperature=temperature)
-    response = await llm.ainvoke(lc_messages)
-    content = response.content
-    if isinstance(content, list):
-        content = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
-    return content
+    llm = get_llm(temperature=temperature, streaming=True)
+    parts: list[str] = []
+    async for chunk in llm.astream(lc_messages):
+        content = chunk.content
+        if isinstance(content, list):
+            content = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+        if content:
+            parts.append(content)
+            stream_bus.push(session_id, content)
+    return "".join(parts)
