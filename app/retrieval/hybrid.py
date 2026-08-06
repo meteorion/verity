@@ -40,7 +40,7 @@ def _retrieval_cfg() -> dict[str, Any]:
             "top_vector":               int(s.get("retrieval_top_vector") or _TOP_VECTOR),
             "dense_score_threshold":    float(s.get("dense_score_threshold") or 0.0),
             "rrf_alpha":                float(s.get("rrf_alpha") or 0.6),
-            "ef_search":                int(s.get("hnsw_ef_search") or 100),
+            "ef_search":                int(s.get("ef_search") or 100),
             "rerank_threshold":         float(s.get("rerank_threshold") or 0.0),
             # Feature flags — set to false in settings.json to disable for A/B observation
             "use_cache":                _bool("use_cache"),

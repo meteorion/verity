@@ -16,7 +16,7 @@ async function saveSettings(payload) {
 
 export default function ModelConfig() {
   const [settings, setSettings] = useState(null)
-  const [editing, setEditing] = useState(null) // 'llm' | 'embedding' | 'ragas' | 'kb'
+  const [editing, setEditing] = useState(null) // 'llm' | 'embedding' | 'ragas' | 'kb' | 'flags'
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -84,6 +84,19 @@ export default function ModelConfig() {
           ] : []}
           onEdit={() => setEditing('kb')}
         />
+        <ConfigCard
+          title="检索优化"
+          tag="A/B"
+          tagColor="rose"
+          loading={!settings}
+          fields={settings ? [
+            { label: '语义缓存',    value: settings.use_cache                ? '启用' : '关闭', active: settings.use_cache },
+            { label: '稀疏检索',    value: settings.use_sparse               ? '启用' : '关闭', active: settings.use_sparse },
+            { label: '问题增强',    value: settings.use_question_augmentation ? '启用' : '关闭', active: settings.use_question_augmentation },
+            { label: 'Small-to-Big', value: settings.use_small_to_big        ? '启用' : '关闭', active: settings.use_small_to_big },
+          ] : []}
+          onEdit={() => setEditing('flags')}
+        />
       </div>
 
       {/* Row 2 — prompt versions */}
@@ -118,6 +131,13 @@ export default function ModelConfig() {
           onSaved={() => { setEditing(null); load() }}
         />
       )}
+      {editing === 'flags' && (
+        <RetrievalFlagsEditModal
+          initial={settings}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load() }}
+        />
+      )}
     </div>
   )
 }
@@ -129,6 +149,7 @@ const TAG_STYLES = {
   purple: 'bg-violet-50 text-violet-600',
   amber:  'bg-amber-50 text-amber-600',
   teal:   'bg-teal-50 text-teal-600',
+  rose:   'bg-rose-50 text-rose-600',
 }
 
 function ConfigCard({ title, tag, tagColor, fields, onEdit, loading }) {
@@ -156,13 +177,19 @@ function ConfigCard({ title, tag, tagColor, fields, onEdit, loading }) {
         </div>
       ) : (
         <dl className="space-y-2">
-          {fields.map(({ label, value, mono, truncate }) => (
+          {fields.map(({ label, value, mono, truncate, active }) => (
             <div key={label} className="flex items-baseline gap-2">
               <dt className="text-[11px] text-slate-400 w-20 shrink-0">{label}</dt>
-              <dd className={`text-xs text-slate-700 min-w-0 ${mono ? 'font-mono' : ''} ${truncate ? 'truncate' : ''}`}
-                title={truncate ? String(value) : undefined}>
-                {value ?? '—'}
-              </dd>
+              {active !== undefined ? (
+                <dd className={`text-[10px] font-semibold px-1.5 py-0.5 rounded leading-none ${active ? 'text-teal-600 bg-teal-50' : 'text-slate-400 bg-slate-100'}`}>
+                  {value}
+                </dd>
+              ) : (
+                <dd className={`text-xs text-slate-700 min-w-0 ${mono ? 'font-mono' : ''} ${truncate ? 'truncate' : ''}`}
+                  title={truncate ? String(value) : undefined}>
+                  {value ?? '—'}
+                </dd>
+              )}
             </div>
           ))}
         </dl>
@@ -278,11 +305,14 @@ const _NI = 'w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus
 
 function KbEditModal({ initial, onClose, onSaved }) {
   const [form, setForm] = useState({
-    retrieval_top_k:      initial?.retrieval_top_k      ?? 6,
-    retrieval_top_vector: initial?.retrieval_top_vector  ?? 50,
-    rerank_threshold:     initial?.rerank_threshold      ?? 0.38,
-    chunk_size:           initial?.chunk_size            ?? 600,
-    chunk_overlap:        initial?.chunk_overlap         ?? 80,
+    retrieval_top_k:        initial?.retrieval_top_k        ?? 6,
+    retrieval_top_vector:   initial?.retrieval_top_vector   ?? 50,
+    rerank_threshold:       initial?.rerank_threshold       ?? 0.38,
+    dense_score_threshold:  initial?.dense_score_threshold  ?? 0.0,
+    rrf_alpha:              initial?.rrf_alpha              ?? 0.6,
+    ef_search:              initial?.ef_search              ?? 40,
+    chunk_size:             initial?.chunk_size             ?? 600,
+    chunk_overlap:          initial?.chunk_overlap          ?? 80,
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -310,6 +340,19 @@ function KbEditModal({ initial, onClose, onSaved }) {
         <input type="number" min="0" max="1" step="0.01" value={form.rerank_threshold}
           onChange={e => num('rerank_threshold', e.target.value)} className={_NI} />
       </FormRow>
+      <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider pb-1 border-b border-slate-100 mt-2">向量高级</p>
+      <FormRow label="密集阈值" hint="cosine 相似度最低分（0 = 不过滤），过低可能引入噪声">
+        <input type="number" min="0" max="1" step="0.01" value={form.dense_score_threshold}
+          onChange={e => num('dense_score_threshold', e.target.value)} className={_NI} />
+      </FormRow>
+      <FormRow label="RRF α" hint="加权 RRF 中密集路径的权重（0–1），1-α 为稀疏权重">
+        <input type="number" min="0" max="1" step="0.05" value={form.rrf_alpha}
+          onChange={e => num('rrf_alpha', e.target.value)} className={_NI} />
+      </FormRow>
+      <FormRow label="ef_search" hint="HNSW 搜索扩展因子，越大召回率越高、延迟越高">
+        <input type="number" min="10" max="500" step="10" value={form.ef_search}
+          onChange={e => num('ef_search', e.target.value)} className={_NI} />
+      </FormRow>
       <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider pb-1 border-b border-slate-100 mt-2">切分</p>
       <FormRow label="分块大小" hint="单块 token 上限，变更后重新入库才生效">
         <input type="number" min="100" max="2000" step="50" value={form.chunk_size}
@@ -319,6 +362,51 @@ function KbEditModal({ initial, onClose, onSaved }) {
         <input type="number" min="0" max="500" step="10" value={form.chunk_overlap}
           onChange={e => num('chunk_overlap', e.target.value)} className={_NI} />
       </FormRow>
+    </EditModal>
+  )
+}
+
+// ─── Retrieval feature flags edit modal ───────────────────────────────────────
+
+function RetrievalFlagsEditModal({ initial, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    use_cache:                initial?.use_cache                ?? true,
+    use_sparse:               initial?.use_sparse               ?? true,
+    use_question_augmentation: initial?.use_question_augmentation ?? true,
+    use_small_to_big:         initial?.use_small_to_big         ?? true,
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  function toggle(k) { setForm(f => ({ ...f, [k]: !f[k] })) }
+
+  async function save() {
+    setSaving(true); setError('')
+    try { await saveSettings(form); onSaved() }
+    catch (e) { setError(e.message) } finally { setSaving(false) }
+  }
+
+  const FLAGS = [
+    { key: 'use_cache',                label: '语义缓存',    hint: 'Redis hash 缓存，相同语义查询直接返回，跳过检索' },
+    { key: 'use_sparse',               label: '稀疏检索',    hint: '稀疏向量召回路径，仅 EMBEDDING_PROVIDER=local 时生效' },
+    { key: 'use_question_augmentation', label: '问题增强',   hint: 'question_embeddings 第三召回路径，提升长尾问法命中率' },
+    { key: 'use_small_to_big',         label: 'Small-to-Big', hint: '召回子块后扩展到父级 chunk，提供更完整上下文' },
+  ]
+
+  return (
+    <EditModal title="编辑检索优化开关" onClose={onClose} onSave={save} saving={saving} error={error}>
+      <p className="text-xs text-slate-400 -mt-1 mb-3">关闭某项技术后可与开启状态进行 A/B 对比观察。</p>
+      <div className="space-y-4">
+        {FLAGS.map(({ key, label, hint }) => (
+          <div key={key} className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-slate-700">{label}</p>
+              <p className="text-xs text-slate-400 mt-0.5">{hint}</p>
+            </div>
+            <Toggle checked={form[key]} onChange={() => toggle(key)} />
+          </div>
+        ))}
+      </div>
     </EditModal>
   )
 }
@@ -552,6 +640,20 @@ function GhostBtn({ children, onClick, disabled }) {
     <button onClick={onClick} disabled={disabled}
       className="h-7 px-2.5 text-xs text-slate-500 rounded-md hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 transition-colors">
       {children}
+    </button>
+  )
+}
+
+function Toggle({ checked, onChange }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={onChange}
+      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${checked ? 'bg-indigo-500' : 'bg-slate-200'}`}
+    >
+      <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`} />
     </button>
   )
 }

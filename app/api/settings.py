@@ -66,6 +66,10 @@ class SettingsRead(BaseModel):
     dense_score_threshold: float  # min cosine similarity for dense retrieval (0 = off)
     rrf_alpha: float              # dense weight in weighted RRF (0-1, 1-α = sparse weight)
     ef_search: int                # HNSW ef_search (higher = better recall, slower query)
+    use_cache: bool               # semantic cache (Redis hash-based)
+    use_sparse: bool              # sparse vector retrieval path (local embedding only)
+    use_question_augmentation: bool  # question_embeddings third retrieval path
+    use_small_to_big: bool        # expand child chunks to parent (Small-to-Big)
 
 
 class SettingsWrite(BaseModel):
@@ -86,6 +90,10 @@ class SettingsWrite(BaseModel):
     dense_score_threshold: Optional[float] = None
     rrf_alpha: Optional[float] = None
     ef_search: Optional[int] = None
+    use_cache: Optional[bool] = None
+    use_sparse: Optional[bool] = None
+    use_question_augmentation: Optional[bool] = None
+    use_small_to_big: Optional[bool] = None
 
 
 @router.get("", response_model=SettingsRead)
@@ -106,6 +114,12 @@ async def get_settings():
         if v is not None:
             return float(v)
         return float(os.getenv(env_var, str(default)))
+
+    def _bool(field: str, default: bool = True) -> bool:
+        v = s.get(field)
+        if v is None:
+            return default
+        return str(v).lower() not in ("false", "0", "no")
 
     llm_key = _str("llm_api_key", "LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
     emb_key = _str("embedding_api_key", "EMBEDDING_API_KEY") or llm_key
@@ -134,6 +148,10 @@ async def get_settings():
         dense_score_threshold=_float("dense_score_threshold", "DENSE_SCORE_THRESHOLD", 0.0),
         rrf_alpha=_float("rrf_alpha", "RRF_ALPHA", 0.6),
         ef_search=_int("ef_search", "EF_SEARCH", 40),
+        use_cache=_bool("use_cache"),
+        use_sparse=_bool("use_sparse"),
+        use_question_augmentation=_bool("use_question_augmentation"),
+        use_small_to_big=_bool("use_small_to_big"),
     )
 
 
