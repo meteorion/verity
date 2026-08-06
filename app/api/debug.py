@@ -1,12 +1,18 @@
-"""Debug endpoint — non-streaming full-trace response for the admin Playground.
+"""Debug endpoint — streaming SSE response for the admin Playground.
 
-POST /v1/debug  →  {answer, intent, faq_hit, chunks, refs, spans, total_ms}
+POST /v1/debug  →  SSE stream:
+  data: [SPAN]{json}          — emitted per node as it completes
+  data: "token"               — answer tokens from generate node
+  data: [DEBUG]{json}         — final frame: chunks / refs / spans / meta
+  data: [DONE]
 
-Uses stream_mode="updates" so each node update arrives in order;
-timestamps are captured on arrival to produce per-node latency.
+Uses stream_mode=["updates","messages"] so node spans and LLM tokens
+arrive concurrently without a separate request.
 """
+import json
 import time
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.sessions import record_turn
@@ -54,84 +60,104 @@ async def debug_chat(req: DebugRequest, request: Request):
     project_group = request.headers.get("X-Project-Group") or None
 
     graph = request.app.state.graph
-
-    spans: list[dict] = []
-    accumulated: dict = {}
-    t0 = time.perf_counter()
-    t_prev = t0
-
     top_k = int(req.options.get("top_k", 6))
     temperature = float(req.options.get("temperature", 0.2))
 
-    async for update in graph.astream(
-        {
-            "session_id": req.session_id,
-            "uid": uid,
-            "roles": roles,
-            "region": region,
-            "project_group": project_group,
-            "query_raw": req.message,
-            "top_k": top_k,
-            "llm_temperature": temperature,
-            "answer_stream": None,
-            "retrieved_chunks": [],
-        },
-        config={"configurable": {"thread_id": req.session_id}},
-        stream_mode="updates",
-    ):
-        t_now = time.perf_counter()
-        for node_name, node_output in update.items():
-            if not node_output:
-                continue
-            spans.append({
-                "span": node_name,
-                "detail": _span_detail(node_name, node_output),
-                "latency_ms": round((t_now - t_prev) * 1000),
-            })
-            accumulated.update(node_output)
-        t_prev = t_now
+    async def event_stream():
+        spans: list[dict] = []
+        accumulated: dict = {}
+        t0 = time.perf_counter()
+        t_prev = t0
 
-    # Strip embedding / sparse_vector — safe display subset only
-    chunks = [
-        {k: (float(v) if k == "score" else v)
-         for k, v in c.items()
-         if k in _SAFE_CHUNK_KEYS}
-        for c in (accumulated.get("retrieved_chunks") or [])
-    ]
+        async for mode, chunk in graph.astream(
+            {
+                "session_id": req.session_id,
+                "uid": uid,
+                "roles": roles,
+                "region": region,
+                "project_group": project_group,
+                "query_raw": req.message,
+                "top_k": top_k,
+                "llm_temperature": temperature,
+                "answer_stream": None,
+                "retrieved_chunks": [],
+            },
+            config={"configurable": {"thread_id": req.session_id}},
+            stream_mode=["updates", "messages"],
+        ):
+            t_now = time.perf_counter()
 
-    raw_chunks = accumulated.get("retrieved_chunks") or []
-    refs = build_refs(raw_chunks)
+            if mode == "updates":
+                for node_name, node_output in chunk.items():
+                    if not node_output:
+                        continue
+                    span = {
+                        "span": node_name,
+                        "detail": _span_detail(node_name, node_output),
+                        "latency_ms": round((t_now - t_prev) * 1000),
+                    }
+                    spans.append(span)
+                    accumulated.update(node_output)
+                    t_prev = t_now
+                    yield f"data: [SPAN]{json.dumps(span, ensure_ascii=False)}\n\n"
 
-    answer = accumulated.get("answer_stream") or ""
+            elif mode == "messages":
+                msg_chunk, metadata = chunk
+                node = metadata.get("langgraph_node", "")
+                if node == "generate":
+                    content = msg_chunk.content if hasattr(msg_chunk, "content") else ""
+                    if isinstance(content, list):
+                        content = "".join(
+                            p.get("text", "") for p in content if isinstance(p, dict)
+                        )
+                    if content:
+                        yield f"data: {json.dumps(content, ensure_ascii=False)}\n\n"
 
-    total_ms = round((time.perf_counter() - t0) * 1000)
-    try:
-        record_turn(
-            session_id=req.session_id,
-            uid=uid,
-            roles=[r for r in roles if r],
-            region=region,
-            query=req.message,
-            answer=answer,
-            intent=accumulated.get("intent"),
-            faq_hit=bool(accumulated.get("faq_hit")),
-            chunks=raw_chunks,
-            transferred=bool(accumulated.get("transferred")),
-            transfer_reason=accumulated.get("transfer_reason"),
-            first_token_ms=None,
-            total_ms=total_ms,
-            cache_hit=bool(accumulated.get("cache_hit")),
-        )
-    except Exception:
-        pass
+        # ── final frame ──────────────────────────────────────────────────
+        raw_chunks = accumulated.get("retrieved_chunks") or []
+        chunks_safe = [
+            {k: (float(v) if k == "score" else v)
+             for k, v in c.items() if k in _SAFE_CHUNK_KEYS}
+            for c in raw_chunks
+        ]
+        refs = build_refs(raw_chunks)
+        answer = accumulated.get("answer_stream") or ""
+        total_ms = round((time.perf_counter() - t0) * 1000)
 
-    return {
-        "answer": answer,
-        "intent": accumulated.get("intent"),
-        "faq_hit": bool(accumulated.get("faq_hit")),
-        "cache_hit": bool(accumulated.get("cache_hit")),
-        "chunks": chunks,
-        "refs": refs,
-        "spans": spans,
-        "total_ms": total_ms,
-    }
+        debug_payload = {
+            "chunks": chunks_safe,
+            "refs": refs,
+            "intent": accumulated.get("intent"),
+            "faq_hit": bool(accumulated.get("faq_hit")),
+            "cache_hit": bool(accumulated.get("cache_hit")),
+            "spans": spans,
+            "total_ms": total_ms,
+        }
+        yield f"data: [DEBUG]{json.dumps(debug_payload, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+        try:
+            record_turn(
+                session_id=req.session_id,
+                uid=uid,
+                roles=[r for r in roles if r],
+                region=region,
+                query=req.message,
+                answer=answer,
+                intent=accumulated.get("intent"),
+                faq_hit=bool(accumulated.get("faq_hit")),
+                chunks=raw_chunks,
+                transferred=bool(accumulated.get("transferred")),
+                transfer_reason=accumulated.get("transfer_reason"),
+                first_token_ms=None,
+                total_ms=total_ms,
+                cache_hit=bool(accumulated.get("cache_hit")),
+            )
+        except Exception:
+            pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

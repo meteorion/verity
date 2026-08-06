@@ -39,6 +39,7 @@ export default function Playground() {
   const [debugging, setDebugging] = useState(false)
   const [debugResult, setDebugResult] = useState(null)
   const [debugError, setDebugError] = useState(null)
+  const [liveSpans, setLiveSpans] = useState([])
 
   // ── new session ───────────────────────────────────────────
   function newSession() {
@@ -51,6 +52,7 @@ export default function Playground() {
     setStreamError(null)
     setDebugResult(null)
     setDebugError(null)
+    setLiveSpans([])
   }
 
   // ── streaming run ─────────────────────────────────────────
@@ -121,9 +123,9 @@ export default function Playground() {
     }
   }
 
-  // ── debug run ─────────────────────────────────────────────
+  // ── debug run (SSE) ───────────────────────────────────────
   async function runDebug() {
-    if (debugging) return
+    if (debugging) { abortRef.current?.abort(); return }
 
     setDebugging(true)
     setAnswer('')
@@ -133,6 +135,12 @@ export default function Playground() {
     setFirstTokenMs(null)
     setTotalMs(null)
     setStreamMeta(null)
+    setLiveSpans([])
+
+    const t0 = performance.now()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    let firstToken = true
 
     try {
       const res = await apiFetch('/v1/debug', {
@@ -145,15 +153,45 @@ export default function Playground() {
           ...(projectGroup ? { 'X-Project-Group': projectGroup } : {}),
         },
         body: JSON.stringify({ session_id: sessionId, message: query, options: { top_k: topK, temperature } }),
+        signal: ctrl.signal,
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
-      const data = await res.json()
-      setAnswer(data.answer || '')
-      setRefs(data.refs || [])
-      setTotalMs(data.total_ms)
-      setDebugResult(data)
+
+      const reader = res.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const events = buf.split('\n\n')
+        buf = events.pop() ?? ''
+        for (const ev of events) {
+          const line = ev.trim()
+          if (!line.startsWith('data: ')) continue
+          const payload = line.slice(6)
+          if (payload === '[DONE]') continue
+          if (payload.startsWith('[SPAN]')) {
+            try { setLiveSpans(p => [...p, JSON.parse(payload.slice(6))]) } catch {}
+            continue
+          }
+          if (payload.startsWith('[DEBUG]')) {
+            try {
+              const data = JSON.parse(payload.slice(7))
+              setDebugResult(data)
+              setRefs(data.refs || [])
+              setTotalMs(data.total_ms)
+            } catch {}
+            continue
+          }
+          // answer token
+          if (firstToken) { setFirstTokenMs(Math.round(performance.now() - t0)); firstToken = false }
+          try { setAnswer(p => p + JSON.parse(payload)) } catch { setAnswer(p => p + payload) }
+        }
+      }
     } catch (e) {
-      setDebugError(e.message)
+      if (e.name !== 'AbortError') setDebugError(e.message)
     } finally {
       setDebugging(false)
     }
@@ -212,9 +250,9 @@ export default function Playground() {
                   <Icon name={streaming ? 'x' : 'play'} size={14} />
                   {streaming ? '停止' : '运行测试'}
                 </Button>
-                <Button variant="primary" size="sm" onClick={runDebug} disabled={streaming || debugging}>
-                  <Icon name="search" size={14} />
-                  {debugging ? '调试中…' : '调试运行'}
+                <Button variant={debugging ? 'danger' : 'primary'} size="sm" onClick={runDebug} disabled={streaming}>
+                  <Icon name={debugging ? 'x' : 'search'} size={14} />
+                  {debugging ? '停止' : '调试运行'}
                 </Button>
               </div>
             </div>
@@ -228,9 +266,9 @@ export default function Playground() {
           {(streaming || debugging) && !answer && (
             <p className="text-sm text-slate-400 animate-pulse">正在检索与生成…</p>
           )}
-          {(answer || streaming) && (
+          {(answer || streaming || debugging) && (
             <div>
-              <AnswerText text={answer} streaming={streaming} />
+              <AnswerText text={answer} streaming={streaming || debugging} />
               {refs.length > 0 && <RefList refs={refs} />}
             </div>
           )}
@@ -322,13 +360,11 @@ export default function Playground() {
         </Card>
 
         <Card title="全链路 Trace">
-          {!debugResult ? (
+          {!debugResult && !liveSpans.length && !debugging ? (
             <p className="text-xs text-slate-400">点击"调试运行"后显示各节点耗时</p>
-          ) : debugResult.spans.length === 0 ? (
-            <p className="text-xs text-slate-400">无 span 数据</p>
           ) : (
             <div className="space-y-2.5">
-              {debugResult.spans.map((t, i) => (
+              {(debugResult?.spans ?? liveSpans).map((t, i) => (
                 <div key={i} className="flex items-center justify-between text-xs">
                   <div>
                     <p className="text-slate-700 font-medium">{t.span}</p>
@@ -339,10 +375,18 @@ export default function Playground() {
                   </span>
                 </div>
               ))}
-              <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-sm">
-                <span className="text-slate-500">合计</span>
-                <span className="font-semibold text-emerald-600">{(debugResult.total_ms / 1000).toFixed(2)} s</span>
-              </div>
+              {debugging && (
+                <div className="flex items-center gap-1.5 text-xs text-slate-400 animate-pulse">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                  运行中…
+                </div>
+              )}
+              {debugResult && (
+                <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-sm">
+                  <span className="text-slate-500">合计</span>
+                  <span className="font-semibold text-emerald-600">{(debugResult.total_ms / 1000).toFixed(2)} s</span>
+                </div>
+              )}
             </div>
           )}
         </Card>
