@@ -7,6 +7,7 @@ ACL/region filtering is enforced at the WHERE clause level (never post-filter).
 import asyncio
 import logging
 import os
+import re
 from typing import Any
 
 import asyncpg
@@ -59,6 +60,20 @@ def _retrieval_cfg() -> dict[str, Any]:
             "use_sparse":               True,
             "use_question_augmentation": True,
         }
+
+
+# Digits, uppercase abbreviations (API/SKU/X500), or quoted strings signal an
+# exact-token query (codes, error messages, literal phrases) where keyword
+# match outperforms dense semantic similarity — lower alpha shifts RRF weight
+# toward sparse.
+_ADAPTIVE_ALPHA_RE = re.compile(r'\d|[A-Z]{2,}|["“”‘’「」『』]')
+_ADAPTIVE_ALPHA_CAP = 0.3
+
+
+def _adaptive_alpha(query: str, base_alpha: float) -> float:
+    if _ADAPTIVE_ALPHA_RE.search(query):
+        return min(base_alpha, _ADAPTIVE_ALPHA_CAP)
+    return base_alpha
 
 
 def _rrf_merge(
@@ -136,7 +151,7 @@ async def hybrid_retrieve(
         for r in sparse_rows:
             if r["chunk_id"] not in row_map:
                 row_map[r["chunk_id"]] = dict(r)
-        alpha = cfg["rrf_alpha"]
+        alpha = _adaptive_alpha(query, cfg["rrf_alpha"])
         base_rankings = [dense_ids, sparse_ids]
         base_weights  = [alpha, 1.0 - alpha]
         logger.debug("Hybrid sparse+dense: dense=%d sparse=%d alpha=%.2f",

@@ -77,6 +77,21 @@ def record_turn(
     _store.move_to_end(session_id)
 
 
+def get_recent_history(session_id: str, n_turns: int = 5) -> list[dict]:
+    """Flatten the last `n_turns` completed turns into role/content messages
+    (oldest first), for seeding graph state at the start of the next turn.
+    """
+    sess = _store.get(session_id)
+    if not sess:
+        return []
+    history: list[dict] = []
+    for turn in sess["turns"][-n_turns:]:
+        history.append({"role": "user", "content": turn["query"]})
+        if turn["answer"]:
+            history.append({"role": "assistant", "content": turn["answer"]})
+    return history
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------

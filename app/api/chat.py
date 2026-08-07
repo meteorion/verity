@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api import auth
-from api.sessions import record_turn
+from api.sessions import get_recent_history, record_turn
 from citations import build_refs
 from graph import stream_bus
 
@@ -65,6 +65,7 @@ async def chat(req: ChatRequest, request: Request):
     _s = _ls()
     top_k = int(req.options.get("top_k", _s.get("retrieval_top_k", 6)))
     temperature = float(req.options.get("temperature", _s.get("llm_temperature", 0.2)))
+    history_recent = get_recent_history(req.session_id)
 
     async def event_stream():
         last_chunks: list[dict] = []
@@ -94,6 +95,7 @@ async def chat(req: ChatRequest, request: Request):
                         "query_raw": req.message,
                         "top_k": top_k,
                         "llm_temperature": temperature,
+                        "history_recent": history_recent,
                         # Reset per-turn fields so the previous turn's values don't
                         # leak via the checkpointed state / stream_mode="values" snapshots.
                         # intent/faq_hit in particular are routing keys: a stale
@@ -102,6 +104,7 @@ async def chat(req: ChatRequest, request: Request):
                         "answer_stream": None,
                         "answer_streamed": False,
                         "retrieved_chunks": [],
+                        "tool_results": [],
                         "intent": None,
                         "faq_hit": False,
                         "cache_hit": False,

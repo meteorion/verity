@@ -102,7 +102,8 @@ async def generate_node(state: OrchestratorState) -> dict:
     history = state.get("history_recent", [])
     summary = state.get("history_summary") or ""
 
-    knowledge = _build_knowledge(chunks, tool_results, state.get("faq_context"))
+    is_chitchat = state.get("intent") == "chitchat"
+    knowledge = _build_knowledge(chunks, tool_results, state.get("faq_context"), is_chitchat=is_chitchat)
     messages = _build_messages(history, summary, state["query_raw"], knowledge)
 
     temperature = state.get("llm_temperature")
@@ -151,7 +152,12 @@ async def generate_node(state: OrchestratorState) -> dict:
     return {"answer_stream": answer, "nli_flags": [], "answer_streamed": streamed_live}
 
 
-def _build_knowledge(chunks: list[dict], tool_results: list[dict], faq_context: str | None = None) -> str:
+def _build_knowledge(
+    chunks: list[dict],
+    tool_results: list[dict],
+    faq_context: str | None = None,
+    is_chitchat: bool = False,
+) -> str:
     parts = []
     if faq_context:
         parts.append(f"[FAQ参考]\n{faq_context}")
@@ -162,7 +168,11 @@ def _build_knowledge(chunks: list[dict], tool_results: list[dict], faq_context: 
         parts.append(f"[{idx}] {crumb}\n{text}" if crumb else f"[{idx}] {text}")
     for r in tool_results:
         parts.append(f"[工具] {r}")
-    return "\n\n".join(parts) if parts else "（无相关知识，请建议转接人工）"
+    if parts:
+        return "\n\n".join(parts)
+    # Chitchat never went through retrieval — "no knowledge" here is expected,
+    # not a miss, so skip the transfer-to-human filler that a real RAG miss gets.
+    return "" if is_chitchat else "（无相关知识，请建议转接人工）"
 
 
 def _build_messages(
@@ -171,10 +181,11 @@ def _build_messages(
     query: str,
     knowledge: str,
 ) -> list[dict]:
-    user_content = f"<知识>\n{knowledge}\n</知识>"
+    user_content = f"<知识>\n{knowledge}\n</知识>" if knowledge else ""
     if summary:
         user_content += f"\n\n<对话摘要>\n{summary}\n</对话摘要>"
     user_content += f"\n\n{query}"
+    user_content = user_content.lstrip()
 
     msgs: list[dict] = []
     for turn in history:

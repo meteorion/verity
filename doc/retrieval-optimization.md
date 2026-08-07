@@ -99,25 +99,31 @@
 
 ## 3. 查询层优化
 
-### 3.1 查询规范化（Normalization）
+### 3.1 查询规范化（Normalization）🟡 部分已实现
 
-轻量级预处理，不需要 LLM 调用：
+**实现状态**：`app/graph/nodes/rewrite.py` 的 `normalize_query()` 已实现第 3、4 项，`rewrite_node` 每次调用都会先跑一遍：
 
-1. **错别字纠正**：维护领域常见错别字词典，或接入文字纠错 API
-2. **同义词扩展**：维护领域同义词表（`config/synonyms.json`），对关键词做同义词替换
-   ```json
-   { "退货": ["退款", "7天无理由", "换货"], "发票": ["收据", "开票"] }
-   ```
-3. **停用词过滤**：移除"我想知道"、"请问"、"能不能告诉我"等无信息量前缀
-4. **数字规范化**："七天" → "7天"，"一百元" → "100元"
+1. **错别字纠正**：待实现——未维护错别字词典，也未接文字纠错 API
+2. **同义词扩展**：待实现——`config/synonyms.json` 不存在，未做同义词替换
+3. ✅ **停用词过滤**：`_STOP_PREFIX_RE` 已覆盖"请问/我想知道/请帮我/麻烦问一下"等前缀
+4. ✅ **数字规范化**：`_cn_to_int()` 已支持中文数字→阿拉伯数字（含十/百/千/万进位）
+
+同义词表格式参考（待建立，2 项未实现之一）：
+```json
+{ "退货": ["退款", "7天无理由", "换货"], "发票": ["收据", "开票"] }
+```
 
 ---
 
-### 3.2 上下文感知改写（Coreference Resolution）
+### 3.2 上下文感知改写（Coreference Resolution）✅ 已实现（原本因历史未接入而失效，已修复）
 
-**问题**：多轮对话中，用户查询含指代词（"它"、"这个"、"上面说的"）或省略主语，单轮检索无法处理。
+**实现状态**：`app/graph/nodes/rewrite.py` 中 `_should_rewrite()`/`_llm_rewrite()` 早已按本节方案写好，但 `app/api/chat.py` 传给 `graph.astream()` 的初始 state 一直没有填充 `history_recent`（`app/api/sessions.py` 只在轮次结束后写入 `_store`，从未在下一轮开始前读出），导致触发条件里的 `history` 恒为空、判改写逻辑从未真正跑过——不仅 3.2，`generate_node`（生成节点的多轮上下文）和 `tool_node`（工单字段抽取）同样读这个字段，等于整个多轮记忆链路都是断的。
 
-**方案**：在检索前用 LLM 将查询与近 N 轮对话历史合并，生成自包含的独立问题。
+**修复**：新增 `sessions.get_recent_history(session_id, n_turns=5)`，在 `chat.py` 每次请求开始时读取最近 5 轮并转换为 `[{"role": "user"/"assistant", "content": ...}]`，注入 `history_recent`。现在改写、生成、工具三处都能拿到真实历史。
+
+**已知偏差**：本节最初约定触发长度阈值 `< 10` 字，但 `rewrite.py` 实际实现为 `>= 25` 字不触发（即阈值 25），保留现状，未强行对齐文档旧描述。
+
+**方案（原计划，现已生效）**：在检索前用 LLM 将查询与近 N 轮对话历史合并，生成自包含的独立问题。
 
 ```
 对话历史：
@@ -147,7 +153,11 @@
 
 ---
 
-### 3.3 多查询展开（Multi-Query）
+### 3.3 多查询展开（Multi-Query）✅ 已实现
+
+**实现状态**：`app/graph/nodes/rewrite.py` 的 `_should_expand()`/`_multi_query_expand()` 已实现，与 3.2 改写在 `rewrite_node` 内用 `asyncio.gather` 并发跑；`app/graph/nodes/rag.py` 的 `_multi_retrieve()` 负责对所有子查询并行调用 `hybrid_retrieve` 后合并。与下方方案的两处出入：
+- 合并方式不是 RRF，而是"每个 chunk_id 取跨子查询最高 score"（因为每路子查询自身已经过 hybrid.py 内部的 RRF+rerank，产出的是已排序分值，不是原始 rank）
+- 触发条件比文档描述更宽：除长度 > 20 字或含连词外，`intent == "product_inquiry"` 也会触发（对接 3.8 的产品咨询路由）
 
 **问题**：单一查询存在召回盲区，用户表述可能不是检索知识库的最优角度。
 
@@ -196,11 +206,13 @@
 
 ---
 
-### 3.5 语义缓存（Semantic Cache）✅ hash 缓存已接入，向量模糊命中待完善
+### 3.5 语义缓存（Semantic Cache）✅ 两层缓存均已实现（此前文档误判"向量模糊命中"未做）
 
-**实现状态**：`app/retrieval/cache.py` hash 精确匹配已接入 `hybrid_retrieve()`（`cache_get` 开头查询，`cache_set` 返回前写入）；`SEMANTIC_CACHE_THRESHOLD` 配置存在，但基于向量相似度的模糊命中逻辑尚未实现（P2 TODO）。
+**实现状态**：系统里实际有两层独立的缓存，此前的文档描述把它们混在一起、且遗漏了其中一层：
+- **检索结果缓存**（`app/retrieval/cache.py`）：hash 精确匹配，缓存 `dense_vec → chunks` 列表，接入 `hybrid_retrieve()`。命中后仍会走一次 LLM 生成。
+- **语义答案缓存**（`app/graph/nodes/rewrite.py` 的 `_check_cache()`/`write_cache()`）：**向量余弦相似度模糊命中已经实现**——Redis SCAN 全量 `semantic_cache:*`，计算余弦相似度，`SEMANTIC_CACHE_THRESHOLD`（默认 0.93）命中即直接返回缓存答案，跳过检索和 LLM。写入在 `generate_node` 生成完成后异步触发（`generate.py` 中 `asyncio.create_task(write_cache(...))`）。TTL 24h（`SEMANTIC_CACHE_TTL` 环境变量）。
 
-**完整方案（P2）**：
+下面这段原方案描述的正是 `rewrite.py` 里已经跑着的逻辑：
 ```
 用户查询 Q
   → embedding → 向量 v
@@ -210,15 +222,19 @@
 ```
 
 **缓存失效策略**：
-- TTL 24h（防止过期知识被命中）
-- 文档导入/删除时清空对应 product_line 的缓存条目
-- 管理后台提供"清空全部缓存"按钮
+- ✅ TTL 24h（两层缓存都有）
+- ✅ 管理后台"清空全部缓存"按钮：`DELETE /cache`（`app/api/settings.py`），一次性清空 `cache:q:*` 与 `semantic_cache:*`
+- 待实现：文档导入/删除时**自动**按 `product_line` 精准清缓存（目前只能手动点全量清空，`app/pipeline/indexer.py` 未挂载失效钩子）
 
 ---
 
-### 3.6 多问法扩充索引（Question Augmentation）✅ 表结构+检索已实现，生成逻辑待实现
+### 3.6 多问法扩充索引（Question Augmentation）✅ 表结构+检索+单chunk生成已实现，文档级批量生成待实现
 
-**实现状态**：`app/db.py` 已建 `question_embeddings` 表（含 HNSW 索引），`hybrid.py` 已有 `_question_search()`。批量生成问法并写入的管理接口尚未实现（P3 TODO）。
+**实现状态**：`app/db.py` 已建 `question_embeddings` 表（含 HNSW 索引），`hybrid.py` 已有 `_question_search()`。`app/api/ops.py` 已提供单 chunk 粒度的管理接口：
+- `POST /chunks/{chunk_id}/questions/generate`：调用 LLM 生成 K 个问法，批量 embedding 后写入（替换该 chunk 旧问法）
+- `GET/POST/PUT/DELETE /chunks/{chunk_id}/questions`：手工增删改查单条问法
+
+尚未实现的是**文档导入时自动为全部 chunk 批量生成**的入口（当前需逐 chunk 手动触发），此项保留为 P3 TODO。
 
 **方案**：文档导入时，为每个 chunk 用 LLM 生成 K 个可能的用户问法，将问法的 embedding 与 chunk 关联存储：
 
@@ -251,7 +267,12 @@ CREATE INDEX ON question_embeddings USING hnsw (embedding vector_cosine_ops);
 
 ---
 
-### 3.7 FAQ 精确匹配层
+### 3.7 FAQ 精确匹配层 🟡 匹配逻辑已实现，管理页面待实现
+
+**实现状态**：`app/graph/nodes/faq.py` 的 `faq_node` 已完整实现匹配三段式，且已接入 graph（`faq` 是 safety 之后、intent 之前的第一个节点）：
+1. ✅ 字符串包含匹配（零成本，命中标准问法）
+2. ✅ 语义匹配：`_HARD_THRESHOLD`（默认 0.96，环境变量 `FAQ_SEMANTIC_HARD_THRESHOLD`）命中直接返回；`_SOFT_THRESHOLD`（默认 0.80，`FAQ_SEMANTIC_SOFT_THRESHOLD`）命中写入 `faq_context` 注入后续 RAG 生成
+3. 存储：FAQ 条目存在 Redis `faq:*` key（`question`/`answer`），本地缓存文本 30s、embedding 5min 刷新一次
 
 **方案**：维护 `faq_questions` 表，每条 FAQ 存储问题的 embedding，检索前先做 FAQ 匹配：
 
@@ -262,21 +283,21 @@ CREATE INDEX ON question_embeddings USING hnsw (embedding vector_cosine_ops);
   → 相似度 < 0.80：正常 RAG
 ```
 
-**数据管理**：管理后台新增 FAQ 维护页面，支持批量导入问答对
+**数据管理**：待实现——目前只能手动写 Redis `faq:*` key 维护问答对，没有管理后台页面或 CRUD API（对比 3.6 已有 `/chunks/{chunk_id}/questions` 系列接口）
 
 ---
 
-### 3.8 意图感知检索路由
+### 3.8 意图感知检索路由 🟡 大部分已实现，2 项子策略待实现
 
 **方案**：intent 节点分类结果注入检索参数，不同意图采用不同策略：
 
-| 意图 | 检索策略 |
-|---|---|
-| `faq` | 优先 FAQ 精确匹配 → 语义缓存 → RAG |
-| `product_inquiry` | 启用 product_line 元数据过滤 + 多查询展开 |
-| `after_sales_refund` | 启用 Step-Back + 时效过滤（最新政策优先） |
-| `complaint` | 跳过 RAG，直接转人工 |
-| `chitchat` | 跳过 RAG，直接 LLM 生成 |
+| 意图 | 检索策略 | 状态 |
+|---|---|---|
+| `faq` | 优先 FAQ 精确匹配 → 语义缓存 → RAG | ✅ `graph.py` 路由本就是 safety→**faq**→intent→rewrite（含语义缓存）→rag |
+| `product_inquiry` | 启用 product_line 元数据过滤 + 多查询展开 | ✅ product_line 过滤对所有意图常开；多查询展开由 `intent=="product_inquiry"` 触发（3.3） |
+| `after_sales_refund` | 启用 Step-Back + 时效过滤（最新政策优先） | 🔴 待实现——`effective_from`/`effective_to` 只做"排除过期"，未做"同一 chunk_id 取最新版本优先"排序；Step-Back（3.4）本身也未实现 |
+| `complaint`（文档原分类） | 跳过 RAG，直接转人工 | ✅ 已实现，但 `intent_node` 把 complaint 和 transfer 合并成同一个 `"transfer"` intent，不是独立的 `complaint` 值 |
+| `chitchat` | 跳过 RAG，直接 LLM 生成 | ✅ **本次修复**：此前 `intent_node` 能分类出 `chitchat`，但 `graph.py` 的 `_route_after_intent` 把它和其他意图一样送进 rewrite→rag，白白多做一次检索；已改为 intent→**直接 generate**，并让 `generate_node` 在 `is_chitchat=True` 时跳过"无相关知识，请建议转接人工"的兜底话术 |
 
 ---
 
@@ -284,14 +305,14 @@ CREATE INDEX ON question_embeddings USING hnsw (embedding vector_cosine_ops);
 
 ### 4.1 混合检索权重调优 ✅ 已实现
 
-**实现状态**：`hybrid.py` 已支持 `rrf_alpha` 参数（通过 `settings.json` 配置，默认 0.5）。
+**实现状态**：`hybrid.py` 已支持 `rrf_alpha` 参数（通过 `settings.json` 配置，默认 0.6）。
 
 ```python
 score(chunk) = α / (k + dense_rank) + (1-α) / (k + sparse_rank)
 ```
 
-- `α` 默认 0.5，通过评估数据集网格搜索标定最优值（0.6 偏向语义，0.3 偏向词匹配）
-- 查询含数字/大写缩写/引号字符串时自动降低 `α` 的逻辑尚未实现（P2 TODO）
+- `α` 默认 0.6（`settings.json` 的 `rrf_alpha`），通过评估数据集网格搜索标定最优值（0.6 偏向语义，0.3 偏向词匹配）
+- ✅ 查询含数字/大写缩写（2+连续大写字母，如型号 `X500`）/引号字符串时自动将 `α` 降至 `min(base_alpha, 0.3)`，偏向词匹配。实现见 `hybrid.py` 的 `_adaptive_alpha()`，仅在 sparse 路径启用时生效（`hybrid.py:139`）
 
 ---
 
@@ -386,24 +407,31 @@ Prompt：
 
 ## 6. 整体检索流程
 
+实际图节点顺序（`app/graph/graph.py`）：safety → faq → intent → rewrite → rag → generate
+
 ```
 用户输入 query
     │
-    ├─ [预处理] 规范化 / 错别字纠正 / 停用词过滤（3.1）
+    ├─ [安全拦截] safety_node
     │
-    ├─ [语义缓存] hash 命中 → 直接返回；向量模糊命中（P2）（3.5）
+    ├─ [FAQ 精确匹配]（3.7，已实现）
+    │     命中(≥0.96) → 直接返回
+    │     命中(0.80~0.96) → 结果注入后续生成（faq_context）
     │
-    ├─ [FAQ 精确匹配] 命中(≥0.96) → 直接返回
-    │                命中(0.80~0.96) → 结果注入后续检索（3.7）
+    ├─ [意图分类] intent_node → faq/tool/transfer/complaint→transfer/
+    │             product_inquiry/after_sales_refund/chitchat/rag（3.8）
+    │     chitchat → 直接跳到 [生成]（3.8，已实现，跳过检索）
+    │     tool/transfer → 各自分支，不进入下面的检索流程
     │
-    ├─ [查询改写]
-    │     ├─ 上下文感知改写（多轮指代解析）（3.2）
-    │     ├─ 多查询展开（复杂问题）（3.3）
-    │     └─ Step-Back（含专有名词）（3.4）
+    ├─ [查询改写] rewrite_node（其余意图都会经过）
+    │     ├─ 规范化 / 停用词过滤 / 数字规范化（3.1，同义词+错别字未做）
+    │     ├─ 语义答案缓存：hash 及向量模糊命中均已接入（3.5）
+    │     │     命中 → 直接返回，跳过检索和生成
+    │     ├─ 上下文感知改写（多轮指代解析，历史注入已修复）（3.2）
+    │     ├─ 多查询展开（复杂问题 / product_inquiry）（3.3）
+    │     └─ Step-Back（含专有名词）—— 未实现（3.4）
     │
-    ├─ [意图路由] 选择检索策略（3.8）
-    │
-    ├─ [混合检索] dense（+score阈值过滤）+ sparse（+ef_search调优）
+    ├─ [混合检索] dense（+score阈值过滤）+ sparse（+ef_search调优，含术语查询自适应α）
     │             + question_embeddings，加权 RRF 合并（4.1/4.3/4.4/3.6）
     │
     ├─ [Small-to-Big] 子 chunk 命中 → 回查父 chunk 完整内容（2.1）
@@ -420,21 +448,21 @@ Prompt：
 | 优先级 | 方案 | 状态 | 预期收益 |
 |---|---|---|---|
 | P1 | 2.1 父子分块 | ✅ 已实现 | 高 |
-| P1 | 3.5 语义缓存（hash 精确匹配，已接入检索路径） | ✅ 已实现 | 高（降本+提速） |
-| P1 | 3.6 多问法扩充索引（表结构+检索） | ✅ 已实现 | 高（待填充数据） |
-| P1 | 4.1 加权 RRF | ✅ 已实现 | 中 |
+| P1 | 3.2 上下文感知改写（历史注入已修复） | ✅ 已实现 | 高（多轮场景必需） |
+| P1 | 3.3 多查询展开 | ✅ 已实现 | 中 |
+| P1 | 3.5 语义缓存（hash 精确匹配 + 向量模糊命中均已接入） | ✅ 已实现 | 高（降本+提速） |
+| P1 | 3.6 多问法扩充索引（表结构+检索+单chunk生成接口） | ✅ 已实现 | 高（待批量填充数据） |
+| P1 | 3.8 意图感知检索路由（faq/product_inquiry/chitchat 三支已生效） | ✅ 已实现 | 中 |
+| P1 | 4.1 加权 RRF + α 自适应（术语查询降 α） | ✅ 已实现 | 中 |
 | P1 | 4.3 dense_score_threshold | ✅ 已实现 | 低（噪声兜底） |
 | P1 | 4.4 ef_search 调优 | ✅ 已实现 | 中 |
-| P2 | 3.1 查询规范化 | 待实现 | 低（基础保障） |
-| P2 | 3.2 上下文感知改写 | 待实现 | 高（多轮场景必需） |
-| P2 | 3.5 语义缓存向量模糊命中 | 待实现 | 中（P1 hash 补充） |
-| P2 | 3.7 FAQ 精确匹配层 | 待实现 | 中 |
-| P2 | 3.3 多查询展开 | 待实现 | 中 |
-| P2 | 3.8 意图感知检索路由 | 待实现 | 中 |
-| P2 | 4.1 α 自适应（术语查询降 α） | 待实现 | 中 |
+| P2 | 3.1 查询规范化（同义词扩展 + 错别字纠正 2 项未做） | 部分待实现 | 低（基础保障） |
+| P2 | 3.7 FAQ 精确匹配层（管理页面未做，匹配逻辑已实现） | 部分待实现 | 中 |
+| P2 | 3.8 意图感知路由中 after_sales_refund 分支（时效优先排序） | 待实现 | 中 |
 | P2 | 2.2 上下文感知切块 | 待实现 | 高（但需 LLM 成本） |
 | P2 | 4.5 HyDE | 待实现 | 中（视召回瓶颈） |
-| P3 | 3.6 多问法批量生成管理接口 | 待实现 | 高（数据填充） |
+| P3 | 3.6 多问法文档级批量生成入口（导入时自动跑全部chunk） | 待实现 | 高（数据填充） |
+| P3 | 3.5 缓存按 product_line 自动失效（目前仅手动全量清空） | 待实现 | 低 |
 | P3 | 2.3 语义切块 | 待实现 | 中 |
 | P3 | 2.4 切块参数自适应 | 待实现 | 中 |
 | P3 | 3.4 Step-Back Prompting | 待实现 | 中（场景有限） |
@@ -459,9 +487,10 @@ Prompt：
 
 ```
 基线测量（当前系统指标：Recall@6 / Recall@50 / context_precision）
-  → 验证已实现的 4 项 P1 优化是否生效
-  → 3.2 上下文感知改写（多轮场景命中率瓶颈）
-  → 4.1 α 自适应（在评估集上标定最优 rrf_alpha）
+  → 验证已实现的 P1 优化是否生效（3.2 历史注入修复、3.3 多查询合并、3.5 语义缓存命中率、
+     3.8 chitchat 短路、4.1 α 自适应触发效果）
+  → 3.1 剩余 2 项（错别字纠正 / 同义词扩展，成本低，可先做）
+  → 3.7 FAQ 管理后台页面（数据侧瓶颈：没有维护入口，FAQ 库就填不起来）
   → 2.2 上下文感知切块（成本较高，优先看 LLM 成本预算）
   → 4.5 HyDE（仅当 Recall@50 < 0.7 时才值得启用）
   → 5.x 精排（P2，需 GPU 或 LLM 预算）

@@ -29,8 +29,11 @@ def _route_after_intent(state: OrchestratorState) -> str:
             return "transfer"
         case "tool":
             return "tool"
+        case "chitchat":
+            # Greetings/thanks/etc. don't need retrieval — straight to LLM generation.
+            return "generate"
         case _:
-            # All RAG/chitchat paths go through rewrite (normalize + cache + coref)
+            # All RAG paths go through rewrite (normalize + cache + coref)
             return "rewrite"
 
 
@@ -55,7 +58,7 @@ def build_graph(checkpointer=None):
     g.set_entry_point("safety")
     g.add_conditional_edges("safety", _route_after_safety, {"faq": "faq", END: END})
     g.add_conditional_edges("faq", _route_after_faq, {"intent": "intent", END: END})
-    g.add_conditional_edges("intent", _route_after_intent)
+    g.add_conditional_edges("intent", _route_after_intent, {"transfer": "transfer", "tool": "tool", "generate": "generate", "rewrite": "rewrite"})
     g.add_conditional_edges("rewrite", _route_after_rewrite, {"rag": "rag", END: END})
     g.add_edge("rag", "generate")
     g.add_edge("tool", "generate")
