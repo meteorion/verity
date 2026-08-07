@@ -83,7 +83,8 @@ verity/
 │   │   ├── embedder.py         # 批量向量化（调用 inference）
 │   │   └── indexer.py          # PGVector 写库
 │   ├── db.py                    # PGVector 幂等 DDL（chunks 表 + HNSW 索引）
-│   ├── scripts/
+│   ├── cron/                   # 容器内运行（docker compose exec app python cron/xxx.py）
+│   │   ├── notify_tick.py      # 工单通知/超时升级/自动关闭，每 10 分钟 Cron 调用
 │   │   └── seed_dummy_chunks.py # 手动灌 dummy chunk，管道没写完前先验证问答链路
 │   └── inference/
 │       ├── embedding.py        # 本地 sentence-transformers（进程内加载，可插拔 backend）
@@ -109,23 +110,32 @@ verity/
 │   ├── postgres/
 │   └── redis/
 │
-├── frontend/                   # Vue 3 + Vite 运营后台
+├── admin-ui/                    # React + Vite 运营后台（docker-compose --profile frontend）
 │   ├── src/
-│   │   ├── views/              # Documents.vue / Metrics.vue / ChatTest.vue
-│   │   ├── api/                # axios 封装
-│   │   ├── App.vue
-│   │   └── router.js
-│   ├── index.html
-│   ├── vite.config.js
+│   │   ├── pages/               # KnowledgeBase / Playground / Sessions / Analytics / Tickets...
+│   │   ├── components/
+│   │   └── mock/                # 后端未就位时的本地 mock 数据
 │   └── package.json
 │
-├── scripts/
-│   ├── eval_retrieval.py       # Recall@K 评测
-│   └── eval_generation.py      # LLM-as-Judge 评测
+├── chat-ui/                     # React + Vite 对话测试前端（docker-compose --profile frontend）
+│   ├── src/
+│   └── package.json
 │
-└── doc/
-    ├── design.md               # 系统设计方案
-    ├── arch.md                 # 架构设计文档
+├── scripts/                     # 主机侧开发/运维工具（对比 app/cron/ 的容器内定时脚本）
+│   ├── init_db.py               # 幂等初始化数据库 Schema
+│   ├── check_admission.py       # 文档准入评分诊断
+│   └── test_e2e.py              # 端到端手动验证
+│
+├── knowledge_base/              # RAG 知识库源文档（业务内容，供 pipeline ingest，非项目文档）
+│   ├── merchant/                # 商户入网/认证/合规相关
+│   └── agent/                   # 代理商入驻与合规相关
+│
+├── prompts/                     # 知识库预处理用 LLM Prompt 模板（人工用，非代码调用）
+│   ├── kb-restructure-system.md     # 精简版：作为系统提示词粘贴
+│   └── kb-restructure-standalone.md # 完整版：含角色/输入输出，独立粘贴使用
+│
+└── doc/                         # 项目设计与规划文档（仅文档，不含知识库内容/密钥）
+    ├── design.md               # 设计文档合集（建设方案/架构/检索优化/工单模块/导出工具）
     └── plan.md                 # 执行方案规划
 ```
 
@@ -135,8 +145,7 @@ verity/
 
 | 文档 | 内容 |
 | --- | --- |
-| [doc/design.md](doc/design.md) | 业务背景、为什么选 RAG、总体架构、知识层/检索层/生成层详细设计、评估体系、安全合规、知识运营机制 |
-| [doc/arch.md](doc/arch.md) | C4 上下文图、服务拆分与接口规范、LangGraph 状态机、存储 Schema、单机 Docker Compose 部署、安全架构、告警规则 |
+| [doc/design.md](doc/design.md) | 设计文档合集：建设方案（业务背景/总体架构/知识检索生成层设计/评估体系/安全合规）、架构设计（C4 图/服务拆分/LangGraph 状态机/存储 Schema/部署/告警）、检索质量优化方案、动态工单模块设计、Chunk 导出工具设计方案 |
 | [doc/plan.md](doc/plan.md) | 技术栈选型细节（含 benchmark 方法）、P0~P3 阶段任务拆解、阶段门控验收指标、风险登记册 |
 
 ---
@@ -145,7 +154,7 @@ verity/
 
 > **当前状态**：P1 问答链路（安全过滤 → FAQ → 向量检索 → LLM 生成 → SSE 流式输出）已跑通，
 > 知识入库管道（文档解析/切分，见 `pipeline/parser`、`chunker.py`）仍是 TODO 占位，
-> 检索前先用 `scripts/seed_dummy_chunks.py` 手动灌几条数据，见下方"验证问答链路"。
+> 检索前先用 `app/cron/seed_dummy_chunks.py` 手动灌几条数据，见下方"验证问答链路"。
 
 ### 前置条件
 
@@ -228,7 +237,7 @@ uvicorn main:app --reload --port 8000
 知识入库管道（解析/切分）还是 TODO 占位，检索前先手动灌几条 dummy chunk：
 
 ```bash
-docker compose exec app python scripts/seed_dummy_chunks.py
+docker compose exec app python cron/seed_dummy_chunks.py
 
 curl -N -X POST http://localhost:8000/v1/chat \
   -H "Content-Type: application/json" \
@@ -250,12 +259,11 @@ curl -X POST http://localhost:8000/api/pipeline/ingest \
 
 ### 运行评测
 
-```bash
-# 在金标数据集上跑 Recall@5 回归
-python scripts/eval_retrieval.py --dataset data/gold_standard_v1.jsonl
+评测走 `/api/eval` 接口（Ragas 标准指标：context_precision/recall、faithfulness、answer_correctness 等），通过 admin-ui 的 Evaluation 页面管理数据集并触发，或直接调接口：
 
-# 跑生成质量评测（LLM-as-Judge）
-python scripts/eval_generation.py --dataset data/gold_standard_v1.jsonl
+```bash
+# 创建/上传评测数据集，参见 admin-ui/src/pages/Evaluation.jsx 的调用方式
+curl -X POST http://localhost:8000/api/eval/datasets/{dataset_id}/eval
 ```
 
 ---

@@ -6,10 +6,10 @@
   3. auto_close      — resolved 超 48h 自动关闭
 
 用法（容器内）:
-  docker compose exec app python scripts/notify_tick.py
+  docker compose exec app python cron/notify_tick.py
 
 Cron:
-  */10 * * * * cd /app && python scripts/notify_tick.py >> /var/log/verity/notify.log 2>&1
+  */10 * * * * cd /app && python cron/notify_tick.py >> /var/log/verity/notify.log 2>&1
 """
 import asyncio
 import logging

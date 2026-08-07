@@ -1,7 +1,7 @@
 """手动灌几条 dummy chunk，用于在知识管道（pipeline/*）写完之前先验证问答链路能不能跑通。
 
 用法（容器内）：
-    docker compose exec app python scripts/seed_dummy_chunks.py
+    docker compose exec app python cron/seed_dummy_chunks.py
 """
 import asyncio
 import sys

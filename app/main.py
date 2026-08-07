@@ -61,7 +61,7 @@ async def _run_migrations():
             count = await conn.fetchval("SELECT COUNT(*) FROM prompt_versions")
             if count == 0:
                 from pathlib import Path
-                prompt_path = Path(os.getenv("SYSTEM_PROMPT_PATH", "/app/prompts/system_prompt.txt"))
+                prompt_path = Path(os.getenv("SYSTEM_PROMPT_PATH", "/app/resources/system_prompt.txt"))
                 try:
                     content = prompt_path.read_text(encoding="utf-8").strip()
                 except FileNotFoundError:

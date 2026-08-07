@@ -25,7 +25,7 @@ _MODEL = os.getenv("LLM_MODEL", "qwen-plus")
 _TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
 # File-based fallback prompt loaded once at startup
-_DEFAULT_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "system_prompt.txt"
+_DEFAULT_PROMPT_PATH = Path(__file__).parent.parent.parent / "resources" / "system_prompt.txt"
 _PROMPT_PATH = Path(os.getenv("SYSTEM_PROMPT_PATH", str(_DEFAULT_PROMPT_PATH)))
 
 try:
